@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "policies": [
+    {
+      "id": "botlingknows-mention",
+      "version": 1,
+      "enabled": true,
+      "order": 100,
+      "match": { "source": "botlingknows", "type": "mention" },
+      "delivery": {
+        "mode": "immediate",
+        "quiet_hours_policy": "defer",
+        "foreground_presence_policy": "defer"
+      },
+      "batch": { "coalesce_by": "source", "max_events": 20, "window_ms": 30000 },
+      "target": { "attention_channel": "life" },
+      "reason_code": "botlingknows_mention"
+    },
+    {
+      "id": "botlingknows-other",
+      "version": 1,
+      "enabled": true,
+      "order": 50,
+      "match": { "source": "botlingknows" },
+      "delivery": {
+        "mode": "scheduled",
+        "scheduled_local_time": "09:00",
+        "quiet_hours_policy": "defer",
+        "foreground_presence_policy": "defer"
+      },
+      "batch": { "coalesce_by": "source", "max_events": 50, "window_ms": 60000 },
+      "target": { "attention_channel": "life" },
+      "reason_code": "botlingknows_daily"
+    },
+    {
+      "id": "default",
+      "version": 2,
+      "enabled": true,
+      "order": -1000000,
+      "match": {},
+      "delivery": { "mode": "suppress" }
+    }
+  ]
+}

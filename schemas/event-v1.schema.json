@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reneyuxi0402/wake-bridge/schemas/event-v1.schema.json",
+  "title": "Wake Bridge event contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "type", "dedupe_key", "resource"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "type": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "dedupe_key": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "coalesce_key": { "type": ["string", "null"] },
+    "priority_hint": { "type": ["string", "null"] },
+    "attention_channel_hint": { "type": ["string", "null"] },
+    "actor_ref": { "type": ["string", "null"] },
+    "resource": {
+      "type": "object",
+      "required": ["uri"],
+      "properties": { "uri": { "type": "string", "minLength": 1, "maxLength": 2048 } }
+    },
+    "metadata": { "type": "object" },
+    "payload_preview": { "type": ["string", "null"], "maxLength": 500 },
+    "idempotency_key": { "type": ["string", "null"] }
+  }
+}

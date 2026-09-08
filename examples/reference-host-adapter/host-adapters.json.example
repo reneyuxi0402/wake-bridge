@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "adapters": [
+    {
+      "id": "reference-host-local",
+      "adapter_kind": "reference_host",
+      "adapter_version": "1.0.0",
+      "host_kind": "reference_host",
+      "tested_host_versions": ["replace-with-your-host/version"],
+      "token_env": "WAKEBRIDGE_HOST_TOKEN",
+      "attention_channels": ["default"],
+      "capabilities": {
+        "exact_live_route": true,
+        "cold_push": false,
+        "warm_resume": true,
+        "requires_live_binding": true,
+        "queue_when_busy": true,
+        "steer_when_busy": false,
+        "foreground_presence_observable": true,
+        "session_activity_observable": true,
+        "waiter_turn_settle_compatible": false
+      },
+      "receipt_upper_bound": "host_accepted"
+    }
+  ]
+}
