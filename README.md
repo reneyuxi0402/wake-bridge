@@ -22,7 +22,7 @@ Wake Bridge 是一个 local-first 的 **agent attention scheduler and delivery c
 
 从 [First Wake Quickstart](docs/quickstart.md) 开始。它覆盖 clean install、Agent Space 初始化、仓库外 Host Adapter、第一条受控 wake、MCP、presence、self-commitment 与可选 Source Connector。完整公共文档见 [文档导航](docs/README.md)。
 
-`0.9.0-preview.8` 当前是已通过 clean-artifact 首发演练的本地 release candidate，尚未执行 npm publish 或 GitHub release。Wake Bridge 本身不内置任何具体 agent 产品 Host Adapter；使用者必须已有或实现一个能精确控制目标 session 的 adapter。
+`0.9.0-preview.8` 是首个公开 pre-release，已通过 clean-artifact 首发演练并发布到 npm 的 `preview` channel。Wake Bridge 本身不内置任何具体 agent 产品 Host Adapter；使用者必须已有或实现一个能精确控制目标 session 的 adapter。
 
 ## 为什么有 Wake Bridge
 
@@ -125,7 +125,14 @@ Source Connector 的本地协议、身份 fencing、cursor CAS 与错误处理�
 
 当前 package 名称为 `wake-bridge`，发布 channel 为 `preview`。已验收平台为 macOS arm64/x64、Node.js 20+ 与 SQLite CLI 3.33+；Linux/systemd 尚未进入支持矩阵。
 
-从本地 tarball 验证：
+从 npm 安装当前 preview：
+
+```bash
+npm install --global wake-bridge@preview
+wakebridge release-preflight
+```
+
+从源码 checkout 生成并验证本地 tarball：
 
 ```bash
 npm pack --json
