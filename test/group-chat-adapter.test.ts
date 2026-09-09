@@ -17,7 +17,7 @@ describe("Group Chat reference source", () => {
       room_id: "room_home",
       message_id: "msg_1",
       message_cursor: 184,
-      actor_id: "yuxi",
+      actor_id: "member-b",
       direct: true,
       metadata: { room_id: "untrusted-override", group_schema_version: 99 },
     })).toEqual({
@@ -28,7 +28,7 @@ describe("Group Chat reference source", () => {
       coalesce_key: "group:room_home",
       priority_hint: "high",
       attention_channel_hint: "group:room_home",
-      actor_ref: "group-member:yuxi",
+      actor_ref: "group-member:member-b",
       resource: { uri: "group-chat://room_home/messages/msg_1", cursor: 184 },
       metadata: {
         room_id: "room_home",

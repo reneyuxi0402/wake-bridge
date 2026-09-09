@@ -22,7 +22,7 @@ describe("Group Chat source connector", () => {
         json(response, 200, {
           provider: "group-chat",
           provider_version: "0.1.0",
-          principal_member_id: "heng",
+          principal_member_id: "agent-a",
           scopes: ["events:read", "messages:read"],
           room_allowlist: ["room_home"],
         });
@@ -39,9 +39,9 @@ describe("Group Chat source connector", () => {
             room_id: "room_home",
             message_id: "msg_1",
             message_cursor: 4,
-            actor_id: "yuxi",
+            actor_id: "member-b",
             direct: true,
-            metadata: { mentioned_member_id: "heng" },
+            metadata: { mentioned_member_id: "agent-a" },
           }],
           head_event_cursor: unsupportedSchema ? 10 : 9,
           next_cursor: unsupportedSchema ? 10 : 9,
@@ -65,7 +65,7 @@ describe("Group Chat source connector", () => {
     const connectorAddress = connector.address as AddressInfo;
     const bridge = new WakeBridge({
       instance_id: "group-chat-connector-test",
-      owner_id: "heng",
+      owner_id: "agent-a",
       db_path: join(mkdtempSync(join(tmpdir(), "wake-bridge-group-chat-")), "bridge.sqlite"),
       timezone: "UTC",
     });
@@ -78,7 +78,7 @@ describe("Group Chat source connector", () => {
     }], { GROUP_CHAT_CONNECTOR_TOKEN: connectorToken });
     try {
       expect(connector.manifest).toMatchObject({
-        subject_ref: "group-chat:principal:heng",
+        subject_ref: "group-chat:principal:agent-a",
         read_side_effects: "none",
         credential_custody: "connector",
       });

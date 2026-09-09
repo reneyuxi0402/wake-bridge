@@ -57,7 +57,7 @@ adapter 不需要 Group Chat 管理员 credential。
   "coalesce_key": "group:room_home",
   "priority_hint": "high",
   "attention_channel_hint": "group:room_home",
-  "actor_ref": "group-member:yuxi",
+  "actor_ref": "group-member:member-b",
   "resource": {
     "uri": "group-chat://room_home/messages/msg_01...",
     "cursor": "184"
