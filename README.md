@@ -132,6 +132,8 @@ npm install --global wake-bridge@preview
 wakebridge release-preflight
 ```
 
+这是 npm registry 中的首个也是当前唯一版本，因此 registry 同时把它作为 `latest` 的初始指向；在首个 stable 发布前，无标签安装也会解析到此 preview。为明确表达依赖意图，当前仍推荐显式使用 `wake-bridge@preview`。
+
 从源码 checkout 生成并验证本地 tarball：
 
 ```bash
