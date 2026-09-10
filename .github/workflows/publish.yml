@@ -1,0 +1,85 @@
+name: Publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    name: npm and GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Use an OIDC-capable npm CLI
+        run: npm install --global npm@11.19.1
+
+      - name: Validate release metadata
+        run: |
+          node --input-type=module <<'EOF'
+          import { existsSync } from "node:fs";
+          import manifest from "./package.json" with { type: "json" };
+
+          const expectedTag = `v${manifest.version}`;
+          if (process.env.GITHUB_REF_NAME !== expectedTag) {
+            throw new Error(`Tag ${process.env.GITHUB_REF_NAME} does not match package version ${manifest.version}`);
+          }
+
+          const notes = `docs/releases/${manifest.version}.md`;
+          if (!existsSync(notes)) {
+            throw new Error(`Missing release notes: ${notes}`);
+          }
+          EOF
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Pack the release artifact
+        id: pack
+        run: |
+          mkdir release-artifacts
+          npm pack --json --pack-destination release-artifacts > pack-result.json
+          node --input-type=module <<'EOF' >> "$GITHUB_OUTPUT"
+          import { readFileSync } from "node:fs";
+          const [result] = JSON.parse(readFileSync("pack-result.json", "utf8"));
+          console.log(`filename=release-artifacts/${result.filename}`);
+          EOF
+          shasum -a 256 release-artifacts/*.tgz > release-artifacts/SHA256SUMS
+
+      - name: Publish to npm preview
+        run: npm publish "${{ steps.pack.outputs.filename }}" --access public --tag preview --provenance
+
+      - name: Create GitHub pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.pack.outputs.filename }}" \
+            release-artifacts/SHA256SUMS \
+            --verify-tag \
+            --prerelease \
+            --title "wake-bridge ${GITHUB_REF_NAME#v}" \
+            --notes-file "docs/releases/${GITHUB_REF_NAME#v}.md"

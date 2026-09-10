@@ -36,6 +36,21 @@ wakebridge release-preflight
 npm install --global wake-bridge@preview
 ```
 
+## Maintainer release
+
+公开版本由 GitHub tag 驱动的 release workflow 发布。发布前必须同时提交版本号与
+`docs/releases/<version>.md`，并确保 tag 精确等于 `v<version>`。推送 tag 后，workflow 会在
+GitHub-hosted runner 上重新执行 typecheck、全量测试与 `npm pack`，通过 npm Trusted Publishing/OIDC
+把同一个 tarball 发布到 `preview`，随后创建带 tarball 和 SHA-256 清单的 GitHub pre-release。
+
+```bash
+git tag v0.9.0-preview.9
+git push origin v0.9.0-preview.9
+```
+
+发布链路不保存长期 npm token。workflow 文件固定为 `.github/workflows/publish.yml`；npm package 的
+trusted publisher 必须限制到 `reneyuxi0402/wake-bridge` 和这个文件，并允许 direct publish。
+
 初始化一个私有 Agent Space：
 
 ```bash
