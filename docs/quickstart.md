@@ -1,6 +1,6 @@
 # First Wake Quickstart
 
-状态：`wake-bridge@0.9.0-preview.8` current onboarding。
+状态：`wake-bridge@0.9.0-preview.9` current onboarding。
 
 这条路径从全新安装走到第一条可审计 wake。它面向已经拥有 agent backend、runner、bridge service 或自制 frontend，并能实现精确 session 注入的用户。
 
@@ -15,9 +15,9 @@
 
 ## 1. 安装并创建 Agent Space
 
-已发布的 `0.9.0-preview.8` 支持 macOS arm64/x64、Node.js 20+ 和 SQLite CLI 3.33+。Ubuntu 24.04 LTS x64 的
-systemd user service 当前只属于 `0.9.0-preview.9` 候选；在 release note 明确升级支持矩阵前，Linux 用户应从本地候选
-tarball 按 [Linux VPS runbook](operations/linux-vps.md) 验证，不要把它当作已发布 SLA：
+`0.9.0-preview.9` 支持 macOS arm64/x64，以及带 systemd user service 的 Linux x64；需要 Node.js 20+ 和 SQLite CLI
+3.33+。Linux 实机验证环境为 Ubuntu 22.04 LTS x64，Ubuntu 24.04 x64 当前只有 CI 证据；其他 Linux 环境先按
+[Linux VPS runbook](operations/linux-vps.md) 执行 preflight 与本机 canary：
 
 ```sh
 npm install --global wake-bridge@preview

@@ -1,6 +1,6 @@
 # 协议与数据模型
 
-状态：`0.9.0-preview.8` current public contract。Event、Claim、policy、watch、binding、Batch 与 receipt 的
+状态：`0.9.0-preview.9` current public contract。Event、Claim、policy、watch、binding、Batch 与 receipt 的
 逻辑边界有效；首版 topology 是单 Agent Space instance。policy v1 当前面见第 5、11 节；service registry/enrollment 是
 post-MVP proposal。
 

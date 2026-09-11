@@ -1,6 +1,6 @@
 # 公开验证口径
 
-状态：`wake-bridge@0.9.0-preview.8` 已发布到 npm `preview` / `latest` 与 GitHub pre-release。
+状态：`wake-bridge@0.9.0-preview.9` 已发布到 npm `preview` 与 GitHub pre-release。
 
 公共仓库用以下证据验证自身，不用具体宿主产品的现场结果代替通用契约：
 

@@ -1,6 +1,6 @@
 # Operator status and dead-letter recovery
 
-状态：introduced in `wake-bridge@0.9.0-preview.3`; current in `0.9.0-preview.8`。
+状态：introduced in `wake-bridge@0.9.0-preview.3`; current in `0.9.0-preview.9`。
 
 这组命令面向单 Agent Space 的 operator，不属于第三方 SDK，也不进入 agent MCP。它只补运行态定位与永久投递失败的受控
 恢复，不替 agent 判断来源工作是否仍需处理。

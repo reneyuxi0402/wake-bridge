@@ -1,6 +1,6 @@
 # 架构与路由
 
-状态：`0.9.0-preview.8` current public contract。首版 deployment topology 为单 Agent Space
+状态：`0.9.0-preview.9` current public contract。首版 deployment topology 为单 Agent Space
 instance；共享 service 多 Space 已延后为 post-MVP proposal。
 
 ## 1. 系统边界
@@ -158,10 +158,10 @@ schema 8 是当前 package baseline，6 是最低显式升级版本。新 DB 只
 再显式授权 migration；迁移后 schema/integrity 验证失败会自动恢复 snapshot。restore 同样要求 offline assertion、精确
 instance id、checksum/integrity，并在替换前再备份 current DB。
 
-首个 service profile 是 macOS LaunchAgent；plist 固定 loopback、config 与已安装 CLI 路径，不保存 owner credential。
-`0.9.0-preview.9` 候选增加 Linux systemd user service，同样固定 loopback，并只引用 mode-600 environment/source credential
-file，不把 secret 写进 unit 或 argv。已发布的 `0.9.0-preview.8` 支持矩阵仍只有 macOS；Linux 必须通过 Ubuntu 24.04 LTS
-x64 真实 reboot canary 并进入新 release note 后才构成公开支持。
+macOS service profile 使用 LaunchAgent；plist 固定 loopback、config 与已安装 CLI 路径，不保存 owner credential。
+`0.9.0-preview.9` 增加 Linux systemd user service，同样固定 loopback，并只引用 mode-600 environment/source credential
+file，不把 secret 写进 unit 或 argv。Linux x64 实机验证环境为 Ubuntu 22.04 LTS / systemd 249；Ubuntu 24.04 x64 当前只有
+CI 证据，其他 Linux 环境不在已验证矩阵。
 
 ### Attention Claim Store
 

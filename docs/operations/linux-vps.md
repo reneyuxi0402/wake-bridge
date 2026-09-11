@@ -1,7 +1,8 @@
-# Linux VPS deployment candidate
+# Linux VPS deployment
 
-状态：下一版 preview 候选；目标验证环境为 Ubuntu 24.04 LTS x64。已发布的 `0.9.0-preview.8` 仍是 macOS-only，
-完成真实 VPS reboot canary 和新版本发布前，不得把本页写成现有支持承诺。
+状态：`wake-bridge@0.9.0-preview.9` current runbook。Ubuntu 22.04 LTS x64 / systemd 249 已完成真实 VPS 连续两轮 reboot
+canary；Ubuntu 24.04 x64 已在 CI 验证，但尚无独立真实 VPS 证据。Linux arm64、容器、WSL、NAS 与无 systemd 环境不在
+已验证矩阵。
 
 ## 1. 支持边界
 
@@ -145,5 +146,5 @@ systemctl --user daemon-reload
 ```
 
 `service uninstall` 只删除 unit，保留 config、SQLite 与 backup。package 回滚前先执行 `wakebridge backup`；本次平台支持不改变
-schema，因此可停止候选 service、安装旧 tarball，再使用该版本的 `release-preflight/doctor` 核对。已发布 preview.8 的 npm
+schema，因此可停止当前 service、安装旧 tarball，再使用该版本的 `release-preflight/doctor` 核对。preview.8 的 npm
 manifest 会拒绝 Linux 安装，这属于预期的 fail-closed 回滚边界，不代表数据损坏。

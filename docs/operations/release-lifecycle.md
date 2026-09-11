@@ -1,6 +1,6 @@
 # Release install, upgrade, backup, and rollback
 
-状态：engineering preview current runbook（2026-09-07）。Wake Bridge 发布包只支持 Host Adapter Contract；
+状态：engineering preview current runbook（2026-09-12）。Wake Bridge 发布包只支持 Host Adapter Contract；
 完成本页不等于任何具体 agent 产品获得兼容性或时延保证。
 
 ## 支持矩阵
@@ -9,19 +9,19 @@
 | --- | --- |
 | package | `wake-bridge`，npm dist-tag `preview` |
 | license | Apache-2.0 |
-| OS | 已发布 `0.9.0-preview.8`：macOS / `darwin`；`0.9.0-preview.9` 候选：Ubuntu 24.04 LTS x64 / systemd user service |
-| CPU | arm64、x64 |
+| OS | macOS；带 systemd user service 的 Linux |
+| CPU | macOS arm64/x64；Linux x64 已验证，Linux arm64 尚未验证 |
 | Node.js | 20 或更高 |
 | SQLite CLI | 3.33.0 或更高，且必须支持 `-json` |
 | topology | 每个 Agent Space 一个本地 instance / SQLite DB |
 | schema | current 8；显式升级支持 6、7 → 8 |
 | host integration | out-of-process Host Adapter Contract v1；不内置具体 agent 产品支持 |
 
-已发布 `0.9.0-preview.8` 的 npm manifest 会在非 macOS 平台拒绝安装。`0.9.0-preview.9` 源码候选允许 Linux 并生成
-systemd user unit，但完成真实 VPS reboot canary 与新 preview 发布前，这不是已发布支持。
+`0.9.0-preview.9` 的 npm manifest 允许 macOS 与 Linux，并按平台生成 LaunchAgent 或 systemd user unit。Linux 实机证据来自
+Ubuntu 22.04 LTS x64 / systemd 249 的连续两轮 reboot canary；Ubuntu 24.04 x64 当前只有 CI 证据。
 SQLite 是外部 runtime prerequisite，不由 npm 安装；3.33.0 是 CLI 加入 JSON output mode 的版本。
 
-Ubuntu 24.04 LTS x64 的候选安装、linger、journal 与回滚步骤见 [Linux VPS runbook](linux-vps.md)。Wake Bridge、
+Linux 的安装、linger、journal 与回滚步骤见 [Linux VPS runbook](linux-vps.md)。Wake Bridge、
 Source Connector、Host Adapter 与 agent runtime 必须同机；跨机器 Remote Host Adapter 不在该 profile 内。
 
 ## 从 tarball 干净安装
@@ -93,7 +93,7 @@ wakebridge doctor --config "$HOME/Library/Application Support/WakeBridge/default
 同一 instance 不允许覆盖已有 plist。升级 package 后 plist 的全局安装路径保持不变；若 npm 安装布局改变，先 bootout、
 `service uninstall`，再由新 bin 重装 profile。
 
-## Linux systemd user service（`0.9.0-preview.9` 候选）
+## Linux systemd user service
 
 Linux 上同一个 `wakebridge service install` 写入 instance-scoped user unit，并返回分开的 daemon-reload、enable、start、stop 与
 disable 命令。unit 使用 `UMask=0077`、`Restart=on-failure`，输出进入 journal；它固定监听 `127.0.0.1`，不会自行开放公网端口。

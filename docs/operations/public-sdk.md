@@ -1,6 +1,6 @@
 # Public SDK boundary
 
-状态：introduced in `wake-bridge@0.9.0-preview.2`; current package `0.9.0-preview.8`。
+状态：introduced in `wake-bridge@0.9.0-preview.2`; current package `0.9.0-preview.9`。
 
 Wake Bridge 只把 event、source 与 transport 三条版本化 contract 作为第三方 package surface。Core、DB、daemon、owner
 control 与 release lifecycle 是 package 内部实现，不是可导入 subpath；历史具体产品 Host Adapter 实验也不进入当前 tarball。`exports` map 会拒绝
