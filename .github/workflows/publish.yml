@@ -73,7 +73,7 @@ jobs:
           shasum -a 256 release-artifacts/*.tgz > release-artifacts/SHA256SUMS
 
       - name: Publish to npm preview
-        run: npm publish "${{ steps.pack.outputs.filename }}" --access public --tag preview --provenance
+        run: npm publish "./${{ steps.pack.outputs.filename }}" --access public --tag preview --provenance
 
       - name: Create GitHub pre-release
         env:
