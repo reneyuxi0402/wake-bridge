@@ -178,7 +178,7 @@ describe("release lifecycle", () => {
       });
 
       const systemdUserDirectory = join(current.root, "systemd", "user");
-      const environmentFile = join(current.root, "host.env");
+      const environmentFile = join(current.root, "host env $%.conf");
       const hostAdaptersPath = join(current.root, "host adapters $%.json");
       const cliPath = join(current.root, "wake bridge $% cli.js");
       writeFileSync(environmentFile, "WAKEBRIDGE_TEST_HOST_TOKEN=not-the-owner-token\n", { mode: 0o600 });
@@ -207,6 +207,8 @@ describe("release lifecycle", () => {
       expect(unit).toContain('"--host" "127.0.0.1"');
       expect(unit).toContain('"--port" "54322"');
       expect(unit).toContain("EnvironmentFile=");
+      expect(unit).not.toContain('EnvironmentFile="');
+      expect(unit).toContain("host\\x20env\\x20\\x24%%.conf");
       expect(unit).toContain("wake bridge $$%% cli.js");
       expect(unit).toContain('"--host-adapters"');
       expect(unit).toContain("host adapters $$%%.json");

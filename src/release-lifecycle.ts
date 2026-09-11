@@ -389,13 +389,12 @@ function systemdArgument(value: string): string {
 }
 
 function systemdDirectivePath(value: string): string {
-  return `"${value
-    .replaceAll("\\", "\\\\")
-    .replaceAll('"', '\\"')
-    .replaceAll("%", "%%")
-    .replaceAll("\n", "\\n")
-    .replaceAll("\r", "\\r")
-    .replaceAll("\t", "\\t")}"`;
+  return [...Buffer.from(value, "utf8")].map((byte) => {
+    const character = String.fromCharCode(byte);
+    if (/[A-Za-z0-9/._:@+-]/u.test(character)) return character;
+    if (character === "%") return "%%";
+    return `\\x${byte.toString(16).padStart(2, "0")}`;
+  }).join("");
 }
 
 function serviceFilePath(value: string | undefined, label: string, requirePrivate = false): string | null {

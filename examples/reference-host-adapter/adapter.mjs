@@ -155,7 +155,8 @@ async function main() {
     port: Number(process.env.WAKEBRIDGE_REFERENCE_HOST_PORT ?? "4393"),
     acceptWake: async (delivery) => {
       // Replace this callback with the host's exact-session queue/injection API.
-      process.stdout.write(`${JSON.stringify({ accepted_by_demo_sink: true, ...delivery })}\n`);
+      const { delivery_nonce: _deliveryNonce, ...safeDelivery } = delivery;
+      process.stdout.write(`${JSON.stringify({ accepted_by_demo_sink: true, ...safeDelivery })}\n`);
     },
   });
   const started = await adapter.start();
