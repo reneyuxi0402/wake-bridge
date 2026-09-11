@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -16,14 +16,12 @@ describe("SQLite migrations", () => {
     });
     bridge.close();
     try {
-      chmodSync(path, 0o444);
-      chmodSync(dir, 0o555);
+      const before = readFileSync(path);
       const reopened = new SqliteDatabase(path);
       expect(reopened.query<{ user_version: number }>("PRAGMA user_version;")).toEqual([{ user_version: 8 }]);
       reopened.close();
+      expect(readFileSync(path)).toEqual(before);
     } finally {
-      chmodSync(dir, 0o700);
-      chmodSync(path, 0o600);
       rmSync(dir, { recursive: true, force: true });
     }
   });
