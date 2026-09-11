@@ -36,12 +36,12 @@ export class SqliteDatabase {
     if (existingVersion > 0 && existingVersion < CURRENT_SCHEMA_VERSION && options.allowSchemaUpgrade !== true) {
       throw new Error(`database schema ${existingVersion} requires explicit upgrade to ${CURRENT_SCHEMA_VERSION}; run wakebridge upgrade first`);
     }
-    this.configure();
+    if (existingVersion < CURRENT_SCHEMA_VERSION) this.configure();
   }
 
   private userVersion(): number {
     const result = spawnSync("sqlite3", ["-batch", "-json", this.path], {
-      input: "PRAGMA user_version;\n",
+      input: ".timeout 5000\nPRAGMA user_version;\n",
       encoding: "utf8",
       maxBuffer: 1024 * 1024,
     });

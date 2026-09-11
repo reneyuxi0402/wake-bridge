@@ -1,11 +1,33 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { WakeBridge } from "../src/core.js";
+import { SqliteDatabase } from "../src/db.js";
 
 describe("SQLite migrations", () => {
+  it("opens a current database without replaying schema writes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wake-bridge-current-schema-"));
+    const path = join(dir, "bridge.sqlite");
+    const bridge = new WakeBridge({ instance_id: "i", owner_id: "o", db_path: path, timezone: "UTC" }, {
+      autoMockTransport: false,
+      recoverDispatchLeases: false,
+    });
+    bridge.close();
+    try {
+      chmodSync(path, 0o444);
+      chmodSync(dir, 0o555);
+      const reopened = new SqliteDatabase(path);
+      expect(reopened.query<{ user_version: number }>("PRAGMA user_version;")).toEqual([{ user_version: 8 }]);
+      reopened.close();
+    } finally {
+      chmodSync(dir, 0o700);
+      chmodSync(path, 0o600);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("requires explicit authorization before migrating v6 and then preserves endpoint routes", () => {
     const dir = mkdtempSync(join(tmpdir(), "wake-bridge-route-migration-"));
     const path = join(dir, "bridge.sqlite");
