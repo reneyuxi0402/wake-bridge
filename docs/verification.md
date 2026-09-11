@@ -1,8 +1,10 @@
 # 公开验证口径
 
-状态：`wake-bridge@0.9.0-preview.8` release candidate。
+状态：`wake-bridge@0.9.0-preview.8` 已发布到 npm `preview` / `latest` 与 GitHub pre-release。
 
 公共仓库用以下证据验证自身，不用具体宿主产品的现场结果代替通用契约：
+
+- GitHub CI：每次 `main` push 与 pull request 均在 macOS 上覆盖最低 Node 20 与当前 Node 24；
 
 - Core durability：Event、Claim、Batch、outbox、retry 与 receipt 在 SQLite 中具有可恢复状态；
 - policy：immediate、scheduled、suppress、quiet hours、presence、inactivity watch 与 self-commitment；
@@ -16,4 +18,3 @@
 
 具体 Host Adapter 和 Source Connector 维护方仍须针对自己的版本完成真实登录、identity、restart、offline catch-up、latency、
 presence/activity 与 failure-semantics UAT。通过公共 contract 代表 compatibility，不代表 Wake Bridge 项目替第三方宿主提供运行保证。
-
