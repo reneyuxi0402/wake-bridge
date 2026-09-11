@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -8,9 +8,11 @@ import { initializeInstance } from "../src/instance-config.js";
 import {
   backupInstance,
   databaseStatus,
+  installLinuxSystemdUserService,
   installMacLaunchAgent,
   releasePreflight,
   restoreInstance,
+  uninstallLinuxSystemdUserService,
   uninstallMacLaunchAgent,
   upgradeInstance,
 } from "../src/release-lifecycle.js";
@@ -132,10 +134,10 @@ describe("release lifecycle", () => {
   it("reports runtime/schema readiness and installs a secret-free macOS LaunchAgent profile", () => {
     const current = fixture();
     try {
-      const preflight = releasePreflight(current.config);
+      const preflight = releasePreflight(current.config, { platform: "darwin", architecture: "arm64" });
       expect(preflight).toMatchObject({
         ok: true,
-        release: { platform: "darwin", platform_supported: true },
+        release: { platform: "darwin", architecture: "arm64", platform_supported: true, architecture_supported: true },
         runtime: { node: { supported: true }, sqlite3: { supported: true, json_output: true } },
         instance: { schema_state: "current", integrity: "ok", security_ready: true },
       });
@@ -147,7 +149,7 @@ describe("release lifecycle", () => {
         logs_directory: join(current.root, "logs"),
         cli_path: resolve("src/cli.ts"),
         port: 54321,
-      });
+      }, { platform: "darwin", architecture: "arm64" });
       const plist = readFileSync(service.plist_path, "utf8");
       const config = JSON.parse(readFileSync(current.config, "utf8")) as { admin_token: string };
       expect(plist).toContain("<string>127.0.0.1</string>");
@@ -160,6 +162,84 @@ describe("release lifecycle", () => {
       expect(databaseStatus(JSON.parse(readFileSync(current.config, "utf8")).db_path).integrity).toBe("ok");
     } finally {
       chmodSync(current.root, 0o700);
+      rmSync(current.root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports Linux readiness and installs a secret-free systemd user service profile", () => {
+    const current = fixture();
+    try {
+      const preflight = releasePreflight(current.config, { platform: "linux", architecture: "x64" });
+      expect(preflight).toMatchObject({
+        ok: true,
+        release: { platform: "linux", architecture: "x64", platform_supported: true, architecture_supported: true },
+        runtime: { node: { supported: true }, sqlite3: { supported: true, json_output: true } },
+        instance: { schema_state: "current", integrity: "ok", security_ready: true },
+      });
+
+      const systemdUserDirectory = join(current.root, "systemd", "user");
+      const environmentFile = join(current.root, "host.env");
+      const hostAdaptersPath = join(current.root, "host adapters $%.json");
+      const cliPath = join(current.root, "wake bridge $% cli.js");
+      writeFileSync(environmentFile, "WAKEBRIDGE_TEST_HOST_TOKEN=not-the-owner-token\n", { mode: 0o600 });
+      writeFileSync(hostAdaptersPath, "{}\n", { mode: 0o600 });
+      writeFileSync(cliPath, "// fixture\n", { mode: 0o700 });
+      const service = installLinuxSystemdUserService({
+        config_path: current.config,
+        systemd_user_directory: systemdUserDirectory,
+        environment_file: environmentFile,
+        host_adapters_path: hostAdaptersPath,
+        cli_path: cliPath,
+        port: 54322,
+      }, { platform: "linux", architecture: "x64" });
+      const unit = readFileSync(service.unit_path, "utf8");
+      const config = JSON.parse(readFileSync(current.config, "utf8")) as { admin_token: string; db_path: string };
+      expect(service).toMatchObject({
+        profile: "systemd_user",
+        unit_name: "io.wakebridge.release-test.service",
+        daemon_reload_command: "systemctl --user daemon-reload",
+        enable_command: "systemctl --user enable io.wakebridge.release-test.service",
+        start_command: "systemctl --user start io.wakebridge.release-test.service",
+      });
+      expect(unit).toContain("Type=exec");
+      expect(unit).toContain("UMask=0077");
+      expect(unit).toContain("Restart=on-failure");
+      expect(unit).toContain('"--host" "127.0.0.1"');
+      expect(unit).toContain('"--port" "54322"');
+      expect(unit).toContain("EnvironmentFile=");
+      expect(unit).toContain("wake bridge $$%% cli.js");
+      expect(unit).toContain('"--host-adapters"');
+      expect(unit).toContain("host adapters $$%%.json");
+      expect(unit).toContain(resolve(current.config));
+      expect(unit).not.toContain(config.admin_token);
+      expect(statSync(service.unit_path).mode & 0o077).toBe(0);
+      if (process.platform === "linux") {
+        const verified = spawnSync("systemd-analyze", ["--user", "verify", service.unit_path], { encoding: "utf8" });
+        expect(verified.status, verified.stderr || verified.stdout).toBe(0);
+      }
+      expect(() => installLinuxSystemdUserService({
+        config_path: current.config,
+        systemd_user_directory: systemdUserDirectory,
+        cli_path: cliPath,
+      }, { platform: "linux", architecture: "x64" })).toThrowError(/already exists/u);
+      expect(uninstallLinuxSystemdUserService({
+        config_path: current.config,
+        systemd_user_directory: systemdUserDirectory,
+      }, { platform: "linux" })).toMatchObject({
+        uninstalled: true,
+        profile: "systemd_user",
+        removed: true,
+        data_preserved: true,
+      });
+      expect(databaseStatus(config.db_path).integrity).toBe("ok");
+      chmodSync(environmentFile, 0o644);
+      expect(() => installLinuxSystemdUserService({
+        config_path: current.config,
+        systemd_user_directory: systemdUserDirectory,
+        environment_file: environmentFile,
+        cli_path: cliPath,
+      }, { platform: "linux", architecture: "x64" })).toThrowError(/must not be accessible by group or other users/u);
+    } finally {
       rmSync(current.root, { recursive: true, force: true });
     }
   });

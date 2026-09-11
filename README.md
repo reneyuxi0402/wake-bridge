@@ -22,7 +22,9 @@ Wake Bridge 是一个 local-first 的 **agent attention scheduler and delivery c
 
 从 [First Wake Quickstart](docs/quickstart.md) 开始。它覆盖 clean install、Agent Space 初始化、仓库外 Host Adapter、第一条受控 wake、MCP、presence、self-commitment 与可选 Source Connector。完整公共文档见 [文档导航](docs/README.md)。
 
-`0.9.0-preview.8` 是首个公开 pre-release，已通过 clean-artifact 首发演练并发布到 npm 的 `preview` channel。Wake Bridge 本身不内置任何具体 agent 产品 Host Adapter；使用者必须已有或实现一个能精确控制目标 session 的 adapter。
+`0.9.0-preview.8` 是当前公开 pre-release，已发布到 npm 的 `preview` channel。源码树中的 `0.9.0-preview.9` 是 Linux VPS
+支持候选，尚未通过真实 reboot canary 或执行 npm/GitHub release。Wake Bridge 本身不内置任何具体 agent 产品 Host Adapter；
+使用者必须已有或实现一个能精确控制目标 session 的 adapter。
 
 ## 为什么有 Wake Bridge
 
@@ -123,7 +125,10 @@ Source Connector 的本地协议、身份 fencing、cursor CAS 与错误处理�
 
 ## Preview 安装
 
-当前 package 名称为 `wake-bridge`，发布 channel 为 `preview`。已验收平台为 macOS arm64/x64、Node.js 20+ 与 SQLite CLI 3.33+；Linux/systemd 尚未进入支持矩阵。
+当前 package 名称为 `wake-bridge`，发布 channel 为 `preview`。已发布的 `0.9.0-preview.8` 支持 macOS arm64/x64、
+Node.js 20+ 与 SQLite CLI 3.33+。`0.9.0-preview.9` 源码候选增加 Ubuntu 24.04 LTS x64 / systemd user service；
+完成真实 VPS reboot canary 并发布新 preview 前，Linux 仍不能写成已发布支持。候选部署路径见
+[Linux VPS runbook](docs/operations/linux-vps.md)。
 
 从 npm 安装当前 preview：
 
@@ -138,7 +143,7 @@ wakebridge release-preflight
 
 ```bash
 npm pack --json
-npm install --global ./wake-bridge-0.9.0-preview.8.tgz
+npm install --global ./wake-bridge-0.9.0-preview.9.tgz
 wakebridge release-preflight
 wakebridge init \
   --data-dir /absolute/private/path \

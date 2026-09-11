@@ -9,6 +9,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -22,8 +23,13 @@ import { RELEASE_VERSION } from "./version.js";
 export { RELEASE_VERSION } from "./version.js";
 export const MINIMUM_NODE_MAJOR = 20;
 export const MINIMUM_SQLITE_VERSION = "3.33.0";
-export const SUPPORTED_PLATFORMS = ["darwin"] as const;
+export const SUPPORTED_PLATFORMS = ["darwin", "linux"] as const;
 export const SUPPORTED_ARCHITECTURES = ["arm64", "x64"] as const;
+
+interface ReleaseRuntime {
+  platform?: NodeJS.Platform;
+  architecture?: string;
+}
 
 interface BackupManifest {
   format_version: 1;
@@ -133,11 +139,13 @@ function schemaState(version: number): ReleasePreflight["instance"]["schema_stat
   return "too_old";
 }
 
-export function releasePreflight(configPath?: string): ReleasePreflight {
+export function releasePreflight(configPath?: string, runtime: ReleaseRuntime = {}): ReleasePreflight {
   const nodeMajor = Number(process.versions.node.split(".")[0]);
   const sqliteRuntime = sqliteVersion();
-  const platformSupported = (SUPPORTED_PLATFORMS as readonly string[]).includes(process.platform);
-  const architectureSupported = (SUPPORTED_ARCHITECTURES as readonly string[]).includes(process.arch);
+  const platform = runtime.platform ?? process.platform;
+  const architecture = runtime.architecture ?? process.arch;
+  const platformSupported = (SUPPORTED_PLATFORMS as readonly string[]).includes(platform);
+  const architectureSupported = (SUPPORTED_ARCHITECTURES as readonly string[]).includes(architecture);
   const sqliteSupported = Boolean(sqliteRuntime.version)
     && versionAtLeast(sqliteRuntime.version!, MINIMUM_SQLITE_VERSION)
     && sqliteRuntime.json_output;
@@ -173,8 +181,8 @@ export function releasePreflight(configPath?: string): ReleasePreflight {
       && (!configPath || (instance.security_ready && instance.schema_state === "current" && instance.integrity === "ok")),
     release: {
       package_version: RELEASE_VERSION,
-      platform: process.platform,
-      architecture: process.arch,
+      platform,
+      architecture,
       platform_supported: platformSupported,
       architecture_supported: architectureSupported,
     },
@@ -361,20 +369,60 @@ function serviceLabel(instanceId: string): string {
   return `io.wakebridge.${instanceId.replaceAll(/[^A-Za-z0-9.-]/gu, "-")}`;
 }
 
+function servicePort(value: number | undefined, profile: string): number {
+  const port = value ?? 4311;
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new Error(`${profile} port must be an integer between 1 and 65535`);
+  }
+  return port;
+}
+
+function systemdArgument(value: string): string {
+  return `"${value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("$", () => "$$")
+    .replaceAll("%", "%%")
+    .replaceAll("\n", "\\n")
+    .replaceAll("\r", "\\r")
+    .replaceAll("\t", "\\t")}"`;
+}
+
+function systemdDirectivePath(value: string): string {
+  return `"${value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("%", "%%")
+    .replaceAll("\n", "\\n")
+    .replaceAll("\r", "\\r")
+    .replaceAll("\t", "\\t")}"`;
+}
+
+function serviceFilePath(value: string | undefined, label: string, requirePrivate = false): string | null {
+  if (!value) return null;
+  const path = realpathSync(resolve(value));
+  const status = statSync(path);
+  if (!status.isFile()) throw new Error(`${label} must be a regular file: ${path}`);
+  if (requirePrivate && (status.mode & 0o077) !== 0) {
+    throw new Error(`${label} must not be accessible by group or other users: ${path}`);
+  }
+  return path;
+}
+
 export function installMacLaunchAgent(options: {
   config_path: string;
   launch_agents_directory?: string;
   logs_directory?: string;
   cli_path?: string;
   port?: number;
-}): { installed: true; label: string; plist_path: string; load_command: string; unload_command: string } {
-  if (process.platform !== "darwin") throw new Error("the current release only ships a macOS LaunchAgent profile");
+}, runtime: ReleaseRuntime = {}): { installed: true; profile: "launch_agent"; label: string; plist_path: string; load_command: string; unload_command: string } {
+  const platform = runtime.platform ?? process.platform;
+  if (platform !== "darwin") throw new Error("macOS LaunchAgent installation requires darwin");
   const configPath = realpathSync(resolve(options.config_path));
   const config = loadInstanceConfig(configPath);
-  const preflight = releasePreflight(configPath);
+  const preflight = releasePreflight(configPath, { ...runtime, platform });
   if (!preflight.ok) throw new Error(`release preflight failed; refusing service install: ${preflight.instance.error || preflight.instance.schema_state}`);
-  const port = options.port ?? 4311;
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error("LaunchAgent port must be an integer between 1 and 65535");
+  const port = servicePort(options.port, "LaunchAgent");
   const label = serviceLabel(config.instance_id);
   const launchAgents = resolve(options.launch_agents_directory ?? join(homedir(), "Library", "LaunchAgents"));
   const logs = resolve(options.logs_directory ?? join(dirname(config.db_path), "logs"));
@@ -410,6 +458,7 @@ export function installMacLaunchAgent(options: {
   const domain = `gui/${typeof process.getuid === "function" ? process.getuid() : "UID"}`;
   return {
     installed: true,
+    profile: "launch_agent",
     label,
     plist_path: plistPath,
     load_command: `launchctl bootstrap ${domain} ${plistPath}`,
@@ -428,4 +477,153 @@ export function uninstallMacLaunchAgent(options: {
   const removed = existsSync(plistPath);
   if (removed) unlinkSync(plistPath);
   return { uninstalled: true, label, plist_path: plistPath, removed, data_preserved: true };
+}
+
+export function installLinuxSystemdUserService(options: {
+  config_path: string;
+  systemd_user_directory?: string;
+  environment_file?: string;
+  host_adapters_path?: string;
+  source_connectors_path?: string;
+  source_credentials_path?: string;
+  cli_path?: string;
+  port?: number;
+}, runtime: ReleaseRuntime = {}): {
+  installed: true;
+  profile: "systemd_user";
+  label: string;
+  unit_name: string;
+  unit_path: string;
+  daemon_reload_command: string;
+  enable_command: string;
+  start_command: string;
+  stop_command: string;
+  disable_command: string;
+} {
+  const platform = runtime.platform ?? process.platform;
+  if (platform !== "linux") throw new Error("systemd user service installation requires linux");
+  const configPath = realpathSync(resolve(options.config_path));
+  const config = loadInstanceConfig(configPath);
+  const preflight = releasePreflight(configPath, { ...runtime, platform });
+  if (!preflight.ok) throw new Error(`release preflight failed; refusing service install: ${preflight.instance.error || preflight.instance.schema_state}`);
+  const port = servicePort(options.port, "systemd user service");
+  const label = serviceLabel(config.instance_id);
+  const unitName = `${label}.service`;
+  const xdgConfigHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+  const systemdUserDirectory = resolve(options.systemd_user_directory ?? join(xdgConfigHome, "systemd", "user"));
+  mkdirSync(systemdUserDirectory, { recursive: true, mode: 0o700 });
+  const unitPath = join(systemdUserDirectory, unitName);
+  if (existsSync(unitPath)) throw new Error(`systemd user unit already exists: ${unitPath}`);
+  const cliPath = realpathSync(resolve(options.cli_path ?? process.argv[1]));
+  const environmentFile = serviceFilePath(options.environment_file, "systemd environment file", true);
+  const hostAdaptersPath = serviceFilePath(options.host_adapters_path, "Host Adapter manifest");
+  const sourceConnectorsPath = serviceFilePath(options.source_connectors_path, "Source Connector manifest");
+  const sourceCredentialsPath = serviceFilePath(options.source_credentials_path, "source credential file", true);
+  const execStartArguments = [
+    process.execPath,
+    cliPath,
+    "daemon",
+    "--config",
+    configPath,
+    "--host",
+    "127.0.0.1",
+    "--port",
+    String(port),
+  ];
+  if (hostAdaptersPath) execStartArguments.push("--host-adapters", hostAdaptersPath);
+  if (sourceConnectorsPath) execStartArguments.push("--connectors", sourceConnectorsPath);
+  if (sourceCredentialsPath) execStartArguments.push("--source-credentials", sourceCredentialsPath);
+  const execStart = execStartArguments.map(systemdArgument).join(" ");
+  const environmentFileDirective = environmentFile ? `EnvironmentFile=${systemdDirectivePath(environmentFile)}\n` : "";
+  const contents = `[Unit]
+Description=Wake Bridge ${label}
+
+[Service]
+Type=exec
+UMask=0077
+${environmentFileDirective}ExecStart=${execStart}
+Restart=on-failure
+RestartSec=3s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=default.target
+`;
+  writeFileSync(unitPath, contents, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  chmodSync(unitPath, 0o600);
+  return {
+    installed: true,
+    profile: "systemd_user",
+    label,
+    unit_name: unitName,
+    unit_path: unitPath,
+    daemon_reload_command: "systemctl --user daemon-reload",
+    enable_command: `systemctl --user enable ${unitName}`,
+    start_command: `systemctl --user start ${unitName}`,
+    stop_command: `systemctl --user stop ${unitName}`,
+    disable_command: `systemctl --user disable ${unitName}`,
+  };
+}
+
+export function uninstallLinuxSystemdUserService(options: {
+  config_path: string;
+  systemd_user_directory?: string;
+}, runtime: ReleaseRuntime = {}): {
+  uninstalled: true;
+  profile: "systemd_user";
+  label: string;
+  unit_name: string;
+  unit_path: string;
+  removed: boolean;
+  daemon_reload_command: string;
+  data_preserved: true;
+} {
+  const platform = runtime.platform ?? process.platform;
+  if (platform !== "linux") throw new Error("systemd user service uninstall requires linux");
+  const config = loadInstanceConfig(options.config_path);
+  const label = serviceLabel(config.instance_id);
+  const unitName = `${label}.service`;
+  const xdgConfigHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+  const systemdUserDirectory = resolve(options.systemd_user_directory ?? join(xdgConfigHome, "systemd", "user"));
+  const unitPath = join(systemdUserDirectory, unitName);
+  const removed = existsSync(unitPath);
+  if (removed) unlinkSync(unitPath);
+  return {
+    uninstalled: true,
+    profile: "systemd_user",
+    label,
+    unit_name: unitName,
+    unit_path: unitPath,
+    removed,
+    daemon_reload_command: "systemctl --user daemon-reload",
+    data_preserved: true,
+  };
+}
+
+export function installService(options: {
+  config_path: string;
+  launch_agents_directory?: string;
+  logs_directory?: string;
+  systemd_user_directory?: string;
+  environment_file?: string;
+  host_adapters_path?: string;
+  source_connectors_path?: string;
+  source_credentials_path?: string;
+  cli_path?: string;
+  port?: number;
+}) {
+  if (process.platform === "darwin") return installMacLaunchAgent(options);
+  if (process.platform === "linux") return installLinuxSystemdUserService(options);
+  throw new Error(`service install is unsupported on ${process.platform}`);
+}
+
+export function uninstallService(options: {
+  config_path: string;
+  launch_agents_directory?: string;
+  systemd_user_directory?: string;
+}) {
+  if (process.platform === "darwin") return uninstallMacLaunchAgent(options);
+  if (process.platform === "linux") return uninstallLinuxSystemdUserService(options);
+  throw new Error(`service uninstall is unsupported on ${process.platform}`);
 }

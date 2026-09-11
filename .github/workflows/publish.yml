@@ -31,6 +31,9 @@ jobs:
       - name: Use an OIDC-capable npm CLI
         run: npm install --global npm@11.19.1
 
+      - name: Install SQLite CLI
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
+
       - name: Validate release metadata
         run: |
           node --input-type=module <<'EOF'

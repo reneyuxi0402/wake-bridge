@@ -15,7 +15,9 @@
 
 ## 1. 安装并创建 Agent Space
 
-当前 preview 支持 macOS arm64/x64、Node.js 20+ 和 SQLite CLI 3.33+：
+已发布的 `0.9.0-preview.8` 支持 macOS arm64/x64、Node.js 20+ 和 SQLite CLI 3.33+。Ubuntu 24.04 LTS x64 的
+systemd user service 当前只属于 `0.9.0-preview.9` 候选；在 release note 明确升级支持矩阵前，Linux 用户应从本地候选
+tarball 按 [Linux VPS runbook](operations/linux-vps.md) 验证，不要把它当作已发布 SLA：
 
 ```sh
 npm install --global wake-bridge@preview
@@ -137,7 +139,7 @@ configure → verify identity → bootstrap from-now → real UAT → enable
 
 ## 6. 停止与保留数据
 
-Host Adapter 先关闭当前 session lease，再停止 daemon。若安装了 LaunchAgent，按 [release lifecycle](operations/release-lifecycle.md) 返回的精确 unload/uninstall 命令操作。
+Host Adapter 先关闭当前 session lease，再停止 daemon。若安装了 LaunchAgent 或 systemd user service，按
+[release lifecycle](operations/release-lifecycle.md) 返回的精确 stop/unload/uninstall 命令操作。
 
 卸载 package 或 service 不删除 config、SQLite、backup 和日志。数据删除是另一个需要显式备份与确认的动作。
-

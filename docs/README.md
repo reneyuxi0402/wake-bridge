@@ -30,5 +30,7 @@
 - [Personal policy](operations/policies.md)
 - [Operator control](operations/operator-control.md)
 - [Release lifecycle](operations/release-lifecycle.md)
+- [Linux VPS candidate](operations/linux-vps.md)
 - [公开验证口径](verification.md)
 - [0.9.0-preview.8 release notes](releases/0.9.0-preview.8.md)
+- [0.9.0-preview.9 candidate notes](releases/0.9.0-preview.9.md)

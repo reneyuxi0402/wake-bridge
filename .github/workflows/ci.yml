@@ -11,11 +11,14 @@ permissions:
 
 jobs:
   test:
-    name: Node ${{ matrix.node }} on macOS
-    runs-on: macos-latest
+    name: Node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os:
+          - macos-latest
+          - ubuntu-24.04
         node:
           - 20
           - 24
@@ -28,6 +31,10 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           package-manager-cache: false
+
+      - name: Install SQLite CLI on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
 
       - name: Install dependencies
         run: npm ci

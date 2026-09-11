@@ -9,7 +9,7 @@
 | --- | --- |
 | package | `wake-bridge`，npm dist-tag `preview` |
 | license | Apache-2.0 |
-| OS | macOS / `darwin`；Linux profile 与验证明确延后 |
+| OS | 已发布 `0.9.0-preview.8`：macOS / `darwin`；`0.9.0-preview.9` 候选：Ubuntu 24.04 LTS x64 / systemd user service |
 | CPU | arm64、x64 |
 | Node.js | 20 或更高 |
 | SQLite CLI | 3.33.0 或更高，且必须支持 `-json` |
@@ -17,8 +17,12 @@
 | schema | current 8；显式升级支持 6、7 → 8 |
 | host integration | out-of-process Host Adapter Contract v1；不内置具体 agent 产品支持 |
 
-当前 npm manifest 会在非 macOS 平台拒绝安装，避免把尚未做 systemd、OS matrix 和真实 canary 的 Linux 暗示为已支持。
+已发布 `0.9.0-preview.8` 的 npm manifest 会在非 macOS 平台拒绝安装。`0.9.0-preview.9` 源码候选允许 Linux 并生成
+systemd user unit，但完成真实 VPS reboot canary 与新 preview 发布前，这不是已发布支持。
 SQLite 是外部 runtime prerequisite，不由 npm 安装；3.33.0 是 CLI 加入 JSON output mode 的版本。
+
+Ubuntu 24.04 LTS x64 的候选安装、linger、journal 与回滚步骤见 [Linux VPS runbook](linux-vps.md)。Wake Bridge、
+Source Connector、Host Adapter 与 agent runtime 必须同机；跨机器 Remote Host Adapter 不在该 profile 内。
 
 ## 从 tarball 干净安装
 
@@ -26,7 +30,7 @@ SQLite 是外部 runtime prerequisite，不由 npm 安装；3.33.0 是 CLI 加�
 
 ```bash
 npm pack --json
-npm install --global ./wake-bridge-0.9.0-preview.8.tgz
+npm install --global ./wake-bridge-0.9.0-preview.9.tgz
 wakebridge release-preflight
 ```
 
@@ -89,6 +93,15 @@ wakebridge doctor --config "$HOME/Library/Application Support/WakeBridge/default
 同一 instance 不允许覆盖已有 plist。升级 package 后 plist 的全局安装路径保持不变；若 npm 安装布局改变，先 bootout、
 `service uninstall`，再由新 bin 重装 profile。
 
+## Linux systemd user service（`0.9.0-preview.9` 候选）
+
+Linux 上同一个 `wakebridge service install` 写入 instance-scoped user unit，并返回分开的 daemon-reload、enable、start、stop 与
+disable 命令。unit 使用 `UMask=0077`、`Restart=on-failure`，输出进入 journal；它固定监听 `127.0.0.1`，不会自行开放公网端口。
+
+可选的 `--environment-file` 与 `--source-credentials` 必须指向 group/other 不可读的普通文件。unit 只保存文件路径，不复制
+token；`--host-adapters`、`--connectors` 与 `--source-credentials` 则把相应绝对路径交给 daemon。systemd user manager 的
+linger 是 operator/OS 权限动作，CLI 不替用户执行。
+
 ## 一致性备份
 
 daemon 可运行时执行 online SQLite snapshot：
@@ -96,7 +109,7 @@ daemon 可运行时执行 online SQLite snapshot：
 ```bash
 wakebridge backup \
   --config /absolute/path/wakebridge.config.json \
-  --output /absolute/path/backups/pre-upgrade-0.9.0-preview.8
+  --output /absolute/path/backups/pre-upgrade-0.9.0-preview.9
 ```
 
 输出目录必须事先不存在。命令使用 SQLite `VACUUM INTO` 生成一致性 DB，随后执行 `quick_check`，写入 mode-600

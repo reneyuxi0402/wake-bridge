@@ -11,7 +11,8 @@ const servers = new Set<Server>();
 
 afterEach(async () => {
   await Promise.all([...children].map(async (child) => {
-    if (child.exitCode === null) child.kill("SIGTERM");
+    if (child.exitCode !== null) return;
+    child.kill("SIGTERM");
     await new Promise<void>((done) => child.once("exit", () => done()));
   }));
   children.clear();
@@ -82,6 +83,7 @@ describe("published tarball", () => {
         "docs/quickstart.md",
         "docs/verification.md",
         "docs/operations/release-lifecycle.md",
+        "docs/operations/linux-vps.md",
         "docs/operations/operator-control.md",
         "docs/operations/out-of-process-host-adapter.md",
         "docs/operations/connector-catalog.md",
@@ -92,7 +94,7 @@ describe("published tarball", () => {
         "examples/reference-host-adapter/host-adapters.json.example",
         "examples/policies/botlingknows-conservative.json",
         "docs/operations/templates/sources.json.example",
-        "docs/releases/0.9.0-preview.8.md",
+        "docs/releases/0.9.0-preview.9.md",
         "schemas/event-v1.schema.json",
         "schemas/policy-v1.schema.json",
       ]));
@@ -293,16 +295,32 @@ describe("published tarball", () => {
         "upgrade", "--config", initialized.config_path, "--backup-output", join(root, "second-pre-upgrade"), "--confirm-offline",
       ], installRoot))).toMatchObject({ ok: true, upgraded: true, from_schema: 6, to_schema: 8 });
 
-      const launchAgents = join(root, "LaunchAgents");
-      const installedService = JSON.parse(run(binary, [
-        "service", "install", "--config", initialized.config_path,
-        "--launch-agents-dir", launchAgents, "--logs-dir", join(root, "logs"),
-      ], installRoot)) as { service: { plist_path: string } };
       const configSecret = initializedConfig.admin_token;
-      expect(readFileSync(installedService.service.plist_path, "utf8")).not.toContain(configSecret);
-      expect(JSON.parse(run(binary, [
-        "service", "uninstall", "--config", initialized.config_path, "--launch-agents-dir", launchAgents,
-      ], installRoot))).toMatchObject({ service: { removed: true, data_preserved: true } });
+      if (process.platform === "darwin") {
+        const launchAgents = join(root, "LaunchAgents");
+        const installedService = JSON.parse(run(binary, [
+          "service", "install", "--config", initialized.config_path,
+          "--launch-agents-dir", launchAgents, "--logs-dir", join(root, "logs"),
+        ], installRoot)) as { service: { profile: string; plist_path: string } };
+        expect(installedService.service.profile).toBe("launch_agent");
+        expect(readFileSync(installedService.service.plist_path, "utf8")).not.toContain(configSecret);
+        expect(JSON.parse(run(binary, [
+          "service", "uninstall", "--config", initialized.config_path, "--launch-agents-dir", launchAgents,
+        ], installRoot))).toMatchObject({ service: { removed: true, data_preserved: true } });
+      } else if (process.platform === "linux") {
+        const systemdUserDirectory = join(root, "systemd", "user");
+        const installedService = JSON.parse(run(binary, [
+          "service", "install", "--config", initialized.config_path,
+          "--systemd-user-dir", systemdUserDirectory,
+        ], installRoot)) as { service: { profile: string; unit_path: string } };
+        expect(installedService.service.profile).toBe("systemd_user");
+        expect(readFileSync(installedService.service.unit_path, "utf8")).not.toContain(configSecret);
+        expect(JSON.parse(run(binary, [
+          "service", "uninstall", "--config", initialized.config_path, "--systemd-user-dir", systemdUserDirectory,
+        ], installRoot))).toMatchObject({ service: { removed: true, data_preserved: true } });
+      } else {
+        throw new Error(`release package test does not support ${process.platform}`);
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

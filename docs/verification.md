@@ -4,7 +4,7 @@
 
 公共仓库用以下证据验证自身，不用具体宿主产品的现场结果代替通用契约：
 
-- GitHub CI：每次 `main` push 与 pull request 均在 macOS 上覆盖最低 Node 20 与当前 Node 24；
+- GitHub CI：每次 `main` push 与 pull request 均在 macOS 和 Ubuntu 24.04 上覆盖最低 Node 20 与当前 Node 24；
 
 - Core durability：Event、Claim、Batch、outbox、retry 与 receipt 在 SQLite 中具有可恢复状态；
 - policy：immediate、scheduled、suppress、quiet hours、presence、inactivity watch 与 self-commitment；

@@ -15,10 +15,10 @@ import { operatorStatus, retryDeadLetter } from "./operator-control.js";
 import { loadOutOfProcessHostFile } from "./out-of-process-host.js";
 import {
   backupInstance,
-  installMacLaunchAgent,
+  installService,
   releasePreflight,
   restoreInstance,
-  uninstallMacLaunchAgent,
+  uninstallService,
   upgradeInstance,
 } from "./release-lifecycle.js";
 import type { BridgeConfig } from "./types.js";
@@ -157,8 +157,8 @@ function help(): void {
       "backup --config PATH --output DIRECTORY",
       "upgrade --config PATH --backup-output DIRECTORY --confirm-offline",
       "restore --config PATH --backup DIRECTORY --rollback-output DIRECTORY --confirm-instance-id ID --confirm-offline",
-      "service install --config PATH [--port N] [--launch-agents-dir DIRECTORY] [--logs-dir DIRECTORY]",
-      "service uninstall --config PATH [--launch-agents-dir DIRECTORY]",
+      "service install --config PATH [--port N] [--launch-agents-dir DIRECTORY] [--logs-dir DIRECTORY] [--systemd-user-dir DIRECTORY] [--environment-file PATH] [--host-adapters PATH] [--connectors PATH] [--source-credentials PATH]",
+      "service uninstall --config PATH [--launch-agents-dir DIRECTORY] [--systemd-user-dir DIRECTORY]",
       "daemon --config PATH --port 4311 [--host 127.0.0.1] [--source-credentials PATH] [--host-adapters PATH]",
       "daemon --unsafe-no-auth --host 127.0.0.1 (explicit development mode only)",
       "doctor",
@@ -257,18 +257,24 @@ async function main(): Promise<void> {
     const configPath = instanceConfigPath(parsed.options);
     if (!configPath) throw new Error("service requires --config");
     if (action === "install") {
-      output({ ok: true, service: installMacLaunchAgent({
+      output({ ok: true, service: installService({
         config_path: configPath,
         launch_agents_directory: option(parsed.options, "launch_agents_dir"),
         logs_directory: option(parsed.options, "logs_dir"),
+        systemd_user_directory: option(parsed.options, "systemd_user_dir"),
+        environment_file: option(parsed.options, "environment_file"),
+        host_adapters_path: option(parsed.options, "host_adapters"),
+        source_connectors_path: option(parsed.options, "connectors"),
+        source_credentials_path: option(parsed.options, "source_credentials"),
         port: optionalNumber(option(parsed.options, "port"), "--port"),
       }) });
       return;
     }
     if (action === "uninstall") {
-      output({ ok: true, service: uninstallMacLaunchAgent({
+      output({ ok: true, service: uninstallService({
         config_path: configPath,
         launch_agents_directory: option(parsed.options, "launch_agents_dir"),
+        systemd_user_directory: option(parsed.options, "systemd_user_dir"),
       }) });
       return;
     }

@@ -159,7 +159,9 @@ schema 8 是当前 package baseline，6 是最低显式升级版本。新 DB 只
 instance id、checksum/integrity，并在替换前再备份 current DB。
 
 首个 service profile 是 macOS LaunchAgent；plist 固定 loopback、config 与已安装 CLI 路径，不保存 owner credential。
-package 支持矩阵当前只声明 macOS，Linux/systemd 不构成隐含支持。
+`0.9.0-preview.9` 候选增加 Linux systemd user service，同样固定 loopback，并只引用 mode-600 environment/source credential
+file，不把 secret 写进 unit 或 argv。已发布的 `0.9.0-preview.8` 支持矩阵仍只有 macOS；Linux 必须通过 Ubuntu 24.04 LTS
+x64 真实 reboot canary 并进入新 release note 后才构成公开支持。
 
 ### Attention Claim Store
 
