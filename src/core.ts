@@ -60,7 +60,7 @@ export interface WakeBridgeOptions {
   clock?: () => Date;
   transports?: WakeTransport[];
   autoMockTransport?: boolean;
-  /** Only the canonical dispatcher owner may reclaim expired dispatch leases. */
+  /** Only the canonical dispatcher owner may reclaim leases and reconcile overdue acknowledgements. */
   recoverDispatchLeases?: boolean;
   /** Schema changes are only authorized by the release upgrade workflow. */
   allowSchemaUpgrade?: boolean;
@@ -112,6 +112,18 @@ const DEFAULT_POLICY: PolicyRule = {
   target: { attention_channel: "${attention_channel_hint}" },
   reason_code: "event",
 };
+
+const DEFAULT_ACK_TIMEOUT_MS = 30 * 60_000;
+// Date accepts millisecond values through ±8.64e15. Keep the configured
+// timeout inside that range so computing a cutoff cannot produce an invalid
+// timestamp even though Number.MAX_SAFE_INTEGER is a little larger.
+const MAX_ACK_TIMEOUT_MS = 8_640_000_000_000_000;
+
+function validateAckTimeout(value: unknown): asserts value is number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > MAX_ACK_TIMEOUT_MS) {
+    throw new BridgeError("ack_timeout_ms must be a positive safe integer within the supported date range", "invalid_config", 400);
+  }
+}
 
 function validateResource(resource: ResourceRef): void {
   if (!resource || typeof resource !== "object" || typeof resource.uri !== "string") {
@@ -308,6 +320,8 @@ export class WakeBridge {
     if (!config?.instance_id || !config.owner_id || !config.db_path) {
       throw new BridgeError("instance_id, owner_id and db_path are required", "invalid_config", 400);
     }
+    const ackTimeoutMs = config.ack_timeout_ms ?? DEFAULT_ACK_TIMEOUT_MS;
+    validateAckTimeout(ackTimeoutMs);
     const quietConfig = config.quiet_hours as unknown as Record<string, unknown> | null | undefined;
     const unsupportedQuiet = ["resume_spread_ms", "default_action"].filter((field) => quietConfig && Object.prototype.hasOwnProperty.call(quietConfig, field));
     if (unsupportedQuiet.length) {
@@ -348,6 +362,7 @@ export class WakeBridge {
       activity_ttl_ms: config.activity_ttl_ms ?? 2 * 60_000,
       endpoint_lease_ms: config.endpoint_lease_ms ?? 60 * 60_000,
       dispatch_lease_ms: config.dispatch_lease_ms ?? 30_000,
+      ack_timeout_ms: ackTimeoutMs,
       retry_delay_ms: config.retry_delay_ms ?? 5_000,
       batch_window_ms: config.batch_window_ms ?? 0,
     };
@@ -1192,6 +1207,7 @@ export class WakeBridge {
 
   private recover(): void {
     const now = this.nowIso();
+    const ackTimeoutCutoff = addMs(now, -this.config.ack_timeout_ms!);
     this.db.transaction([
       `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
        SELECT id, 'needs_attention', 'cancelled', 'all_claims_finalized_reconciled', ${sqlValue(now)} FROM batches
@@ -1202,6 +1218,21 @@ export class WakeBridge {
          AND claim_ids_json='[]' AND event_ids_json='[]';`,
       `UPDATE batches SET state='retry_wait', not_before=${sqlValue(now)}, lease_expires_at=NULL, last_error='dispatcher_recovered', updated_at=${sqlValue(now)} WHERE instance_id=${sqlValue(this.config.instance_id)} AND state='dispatching' AND lease_expires_at IS NOT NULL AND lease_expires_at<${sqlValue(now)};`,
       `UPDATE outbox_attempts SET state='expired', finished_at=${sqlValue(now)}, error_class='dispatcher_recovered' WHERE state='leased' AND leased_until IS NOT NULL AND leased_until<${sqlValue(now)};`,
+      `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
+       SELECT b.id, b.state, 'needs_attention', 'ack_timeout', ${sqlValue(now)}
+       FROM batches b JOIN outbox_attempts a ON a.batch_id=b.id
+       WHERE b.instance_id=${sqlValue(this.config.instance_id)} AND b.state='dispatched'
+         AND b.binding_generation IS NOT NULL AND a.state='accepted' AND a.attempt_no=b.attempt
+         AND a.binding_generation=b.binding_generation AND a.finished_at IS NOT NULL
+         AND a.finished_at<=${sqlValue(ackTimeoutCutoff)};`,
+      `UPDATE batches SET state='needs_attention', lease_expires_at=NULL, last_error='ack_timeout', updated_at=${sqlValue(now)}
+       WHERE instance_id=${sqlValue(this.config.instance_id)} AND state='dispatched'
+         AND binding_generation IS NOT NULL
+         AND EXISTS (
+           SELECT 1 FROM outbox_attempts a WHERE a.batch_id=batches.id AND a.state='accepted'
+             AND a.attempt_no=batches.attempt AND a.binding_generation=batches.binding_generation
+             AND a.finished_at IS NOT NULL AND a.finished_at<=${sqlValue(ackTimeoutCutoff)}
+         );`,
       `UPDATE delivery_correlations SET state='expired' WHERE state='outstanding' AND expires_at<${sqlValue(now)};`,
     ]);
   }
@@ -1698,7 +1729,8 @@ export class WakeBridge {
     const batch = this.getBatch(batchId);
     if (!batch) throw new BridgeError("batch not found", "batch_not_found", 404);
     if (batch.state === "seen") return batch;
-    if (batch.state !== "dispatched") throw new BridgeError("batch acknowledgement is not available", "batch_not_ready", 409);
+    const lateAck = batch.state === "needs_attention" && batch.last_error === "ack_timeout";
+    if (batch.state !== "dispatched" && !lateAck) throw new BridgeError("batch acknowledgement is not available", "batch_not_ready", 409);
     // The accepted attempt must be the one that finalized this batch.  A
     // previous accepted attempt may still be present after lease recovery;
     // accepting its late acknowledgement would incorrectly mark a retry as
@@ -1711,12 +1743,16 @@ export class WakeBridge {
     if (!binding || binding.endpoint_id !== endpointId || binding.generation !== generation) throw new BridgeError("batch acknowledgement targets stale binding", "stale_generation", 409);
     const now = this.nowIso();
     this.db.transaction([
-      `UPDATE batches SET state='seen', updated_at=${sqlValue(now)}, lease_expires_at=NULL WHERE id=${sqlValue(batchId)} AND instance_id=${sqlValue(this.config.instance_id)} AND state='dispatched' AND attempt=${Number(accepted.attempt_no)} AND binding_generation=${generation};`,
+      `UPDATE batches SET state='seen', updated_at=${sqlValue(now)}, lease_expires_at=NULL, last_error=${lateAck ? "NULL" : "last_error"}
+       WHERE id=${sqlValue(batchId)} AND instance_id=${sqlValue(this.config.instance_id)}
+         AND state=${sqlValue(batch.state)} ${lateAck ? "AND last_error='ack_timeout'" : ""}
+         AND attempt=${Number(accepted.attempt_no)} AND binding_generation=${generation};`,
       // Keep the transition INSERT immediately after the CAS so changes()
       // refers to that UPDATE.  The receipt follows it and is conditional on
       // the transition INSERT, so a stale/concurrent ack cannot leave a
-      // misleading agent_seen receipt behind.
-      `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at) SELECT ${sqlValue(batchId)}, 'dispatched', 'seen', 'agent_ack', ${sqlValue(now)} WHERE changes()>0;`,
+      // misleading agent_seen receipt behind.  The captured state is the
+      // state fenced by the CAS, including needs_attention for a late ack.
+      `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at) SELECT ${sqlValue(batchId)}, ${sqlValue(batch.state)}, 'seen', 'agent_ack', ${sqlValue(now)} WHERE changes()>0;`,
       `INSERT INTO receipts(id, batch_id, claim_id, stage, at, endpoint_id, binding_generation, transport_kind, details_json)
         SELECT ${sqlValue(id("rcpt"))}, ${sqlValue(batchId)}, NULL, 'agent_seen', ${sqlValue(now)}, ${sqlValue(endpointId)}, ${generation}, ${sqlValue(String(accepted.transport_kind || "unknown"))}, NULL
         WHERE changes()>0;`,

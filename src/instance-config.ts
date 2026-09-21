@@ -19,6 +19,7 @@ export interface WakeBridgeInstanceConfigFile {
   db_path: string;
   timezone: string;
   admin_token: string;
+  ack_timeout_ms?: number;
 }
 
 export interface InitializeInstanceOptions {
@@ -203,6 +204,7 @@ export function bridgeConfigFromFile(path: string): BridgeConfig {
     db_path: config.db_path,
     timezone: config.timezone,
     admin_token: config.admin_token,
+    ...(config.ack_timeout_ms === undefined ? {} : { ack_timeout_ms: config.ack_timeout_ms }),
   };
 }
 

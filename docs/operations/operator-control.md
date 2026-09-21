@@ -13,7 +13,7 @@
 wakebridge status --config /absolute/path/wakebridge.config.json
 ```
 
-这个路径以 observer mode 打开 Core，不回收 expired dispatch lease，也不运行 scheduler。它汇总：
+这个路径以 observer mode 打开 Core，不回收 expired dispatch lease、不推进确认超时状态，也不运行 scheduler。它汇总：
 
 - 各 batch state 数量、当前 due 数、expired dispatch leases；
 - failed attempt 的 `error_class` 计数，以及最多 100 条 dead-letter / needs-attention 摘要；
@@ -41,6 +41,25 @@ credential 不能调用该 endpoint。
 `ok=false` 与 CLI exit code `2` 只对应 `needs_attention`；`degraded` 仍返回 exit code `0`，但应由监控展示。Status 不返回 route
 address、lease token、session ref、provider error message、source credential 或 owner token。它只保留安全的 error class；详细 provider
 错误仍留在本地 DB/operator evidence 中，不进入结构化 health payload。
+
+## Accepted but unacknowledged delivery
+
+自 preview.10 起提供；preview.8 / preview.9 没有此确认超时处理。
+
+Canonical dispatcher 会将接受投递后长期未收到 agent ack 的 batch 从 `dispatched` 转成
+`needs_attention`，`last_error=ack_timeout`，并保留一条状态转换记录。该异常会进入上述 operator health 与
+needs-attention 摘要；agent 可用 `attention_wake_health` 查看 accepted 时间、attempt 与已有 receipts。
+
+默认时限为 30 分钟，从当前 accepted attempt 的完成时间起算，而不是事件发生、开始投递或最近一次状态变更时间。
+实例配置可设置 `ack_timeout_ms`；CLI/daemon 的 `WAKEBRIDGE_ACK_TIMEOUT_MS` 环境变量优先于配置文件。值必须是正整数毫秒。
+时限用于发现缺失确认，不是宿主必须在此时间内完成工作的承诺。
+
+- 不会自动重投：adapter 可能已经实际投递，重投可能重复打扰。
+- 不会自动标已读或已处理：Claim/Event 和 receipt 保持原样。
+- 若当前 binding 对应的原 accepted attempt 后来收到真实 ack，可转为 `seen` 并解除本项异常；旧 generation 仍被拒绝。
+- `batch-retry` 仍只接受 `dead_letter`，不能重开本项异常。先核对 host/agent 的真实结果，再决定是否需要另行安排唤醒；
+  不要为清空异常而伪造 ack。
+- 升级后，已有的超时记录会在 dispatcher 恢复/扫描时按相同规则暴露出来。这不是新增投递，也不要求修改数据库 schema。
 
 ## Dead-letter retry
 

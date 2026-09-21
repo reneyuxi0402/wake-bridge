@@ -141,6 +141,10 @@ Foreground Presence Lease；Core 会同时核对 capability、endpoint token 与
 delivery nonce 确实进入相同 generation 后调用 `consumeWakeEcho()`。Wake echo 只建立可信 `wake_started` activity，不冒充
 `agent_seen`；batch 的 seen/consumed/acted 仍需 agent/harness 通过既有明确 acknowledgement 完成。
 
+自 preview.10 起，Core 默认在接受投递 30 分钟后仍无 agent ack 时标记 `needs_attention` / `ack_timeout`，而不是重新发送已接受的
+delivery。该时限可由 operator 配置；合法的迟到 ack 仍可收尾，但 generation fencing 不变。Adapter 的 busy queue、
+实际注入与换窗处置仍由 adapter 负责；ack/consume/dismiss 不表示 Core 能撤回 adapter 已接收的消息。
+
 ## 5. 支持边界
 
 这项 contract 使自建 backend、CLI harness、frontend 或私有 runtime 可以独立实现 integration。它不使任何具体 runtime

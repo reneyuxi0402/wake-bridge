@@ -1,6 +1,6 @@
 {
   "name": "wake-bridge",
-  "version": "0.9.0-preview.9",
+  "version": "0.9.0-preview.10",
   "description": "Local-first durable attention scheduler and wake bridge for agent harnesses",
   "license": "Apache-2.0",
   "repository": {
@@ -60,7 +60,8 @@
     "docs/adapters/gmail-planned.md",
     "docs/operations/templates/sources.json.example",
     "docs/operations/templates/botlingknows-connector.env.example",
-    "docs/releases/0.9.0-preview.9.md"
+    "docs/releases/0.9.0-preview.9.md",
+    "docs/releases/0.9.0-preview.10.md"
   ],
   "bin": {
     "wakebridge": "dist/src/cli.js"

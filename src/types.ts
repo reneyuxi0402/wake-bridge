@@ -288,6 +288,7 @@ export interface BridgeConfig {
   activity_ttl_ms?: number;
   endpoint_lease_ms?: number;
   dispatch_lease_ms?: number;
+  ack_timeout_ms?: number;
   retry_delay_ms?: number;
   batch_window_ms?: number;
   default_policy?: PolicyRule;

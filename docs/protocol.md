@@ -632,10 +632,21 @@ dispatching
 
 dispatched
   ├─ agent ack ───────────→ seen
-  └─ ack timeout ─────────→ retry_wait or needs_attention
+  └─ ack timeout ─────────→ needs_attention
+
+needs_attention (ack_timeout only)
+  └─ valid late agent ack → seen
 ```
 
 状态更新记录 attempt id；迟到 worker 不能覆盖新状态。
+
+确认超时从当前 accepted attempt 的 `finished_at` 起算，默认 30 分钟，可用实例配置 `ack_timeout_ms` 或 daemon
+环境变量 `WAKEBRIDGE_ACK_TIMEOUT_MS` 设置正整数毫秒值（环境变量优先）。Canonical dispatcher 在恢复与调度扫描时
+将超时的 `dispatched` batch 转为 `needs_attention`，原因是 `ack_timeout`。只读 observer 不执行此转换。
+
+超时表示缺少确认，不证明宿主未投递，因此不自动重投、不修改 Claim/Event，也不补造 `agent_seen` 或
+`agent_consumed` receipt。当前 binding 的原 accepted attempt 仍可用真实的迟到 ack 收尾；endpoint、generation
+与 attempt fencing 不变，旧窗口不能替新窗口确认。旧版本留下的 accepted batch 按同一规则检查，无需 schema migration。
 
 `cancelled` 是未投递 batch 的可审计终态：其中最后一个 claim 在其他路径被 consume/dismiss/expire 后，batch 不再有工作可做。
 这不是 operator incident，不计入 `needs_attention`。

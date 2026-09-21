@@ -95,6 +95,7 @@ describe("published tarball", () => {
         "examples/policies/botlingknows-conservative.json",
         "docs/operations/templates/sources.json.example",
         "docs/releases/0.9.0-preview.9.md",
+        "docs/releases/0.9.0-preview.10.md",
         "schemas/event-v1.schema.json",
         "schemas/policy-v1.schema.json",
       ]));
