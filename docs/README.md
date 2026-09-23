@@ -37,3 +37,4 @@
 - [0.9.0-preview.9 release notes](releases/0.9.0-preview.9.md)
 - [0.9.0-preview.10 release notes](releases/0.9.0-preview.10.md)
 - [0.9.0-preview.11 release notes](releases/0.9.0-preview.11.md)
+- [0.9.0-preview.12 release notes](releases/0.9.0-preview.12.md)
