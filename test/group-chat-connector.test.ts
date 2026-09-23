@@ -68,6 +68,7 @@ describe("Group Chat source connector", () => {
       owner_id: "agent-a",
       db_path: join(mkdtempSync(join(tmpdir(), "wake-bridge-group-chat-")), "bridge.sqlite"),
       timezone: "UTC",
+      incident_attention_channel: "ops",
     });
     const supervisor = new SourceSupervisor(bridge, [{
       id: "group_chat",
@@ -106,6 +107,11 @@ describe("Group Chat source connector", () => {
         last_error_class: "source_connector_contract_error",
       });
       expect(bridge.listEvents({ source: "group_chat" })).toHaveLength(1);
+      expect(bridge.listEvents({ source: "wakebridge.core" })).toMatchObject([{
+        type: "core.incident",
+        attention_channel_hint: "ops",
+        metadata: { reason_code: "source_needs_attention", source: "group_chat" },
+      }]);
     } finally {
       await supervisor.stop();
       bridge.close();

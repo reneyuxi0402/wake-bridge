@@ -82,8 +82,9 @@ Wake Bridge Core
 - 上下文、记忆、身份与换窗恢复；
 - 决定是否安排下一次 self-commitment。
 
-`transport_accepted`、`host_accepted`、宿主实际观察到的 turn start、`agent_seen` 与 `agent_consumed` 是不同证据层。
-当前公共 adapter HTTP 202 最多只产生 `transport_accepted` receipt，不能冒充 agent 已醒来。
+`transport_accepted`、`host_accepted`、绑定 nonce 的 `host_attested`、`agent_seen` 与 `agent_consumed` 是不同证据层。
+当前公共 adapter HTTP 202 最多只产生 `transport_accepted`；只有可信 host 回传当前 attempt 的一次性 delivery nonce 才产生
+`host_attested` 并结束确认超时，它仍不能冒充 agent 已理解或处理该 wake。
 
 ## Host Adapter Contract
 

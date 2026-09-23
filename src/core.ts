@@ -84,6 +84,18 @@ export interface ScheduleClaimInput {
   defer_while_presence?: boolean;
 }
 
+export interface ScheduleClaimWarning {
+  code: "no_current_binding";
+  attention_channel: string;
+}
+
+export interface ScheduleClaimResult {
+  event: WakeEvent;
+  claim: AttentionClaim;
+  duplicate: boolean;
+  warnings: ScheduleClaimWarning[];
+}
+
 export class BridgeError extends WakeBridgeSdkError {
   constructor(
     message: string,
@@ -322,6 +334,10 @@ export class WakeBridge {
     }
     const ackTimeoutMs = config.ack_timeout_ms ?? DEFAULT_ACK_TIMEOUT_MS;
     validateAckTimeout(ackTimeoutMs);
+    if (config.incident_attention_channel != null && (typeof config.incident_attention_channel !== "string"
+      || !config.incident_attention_channel || config.incident_attention_channel.length > 200)) {
+      throw new BridgeError("incident_attention_channel must be a non-empty string of at most 200 characters", "invalid_config", 400);
+    }
     const quietConfig = config.quiet_hours as unknown as Record<string, unknown> | null | undefined;
     const unsupportedQuiet = ["resume_spread_ms", "default_action"].filter((field) => quietConfig && Object.prototype.hasOwnProperty.call(quietConfig, field));
     if (unsupportedQuiet.length) {
@@ -387,6 +403,29 @@ export class WakeBridge {
 
   nowIso(): string {
     return isoNow(this.now());
+  }
+
+  /** Create one policy-routed, deduplicated operator incident when explicitly configured. */
+  reportCoreIncident(input: {
+    kind: "ack_timeout" | "source_needs_attention";
+    identity: Record<string, JsonValue>;
+    resource: ResourceRef;
+  }): EmitResult | null {
+    const channel = this.config.incident_attention_channel;
+    if (!channel) return null;
+    const fingerprint = sha256(stableJson({ kind: input.kind, identity: input.identity }));
+    return this.emitEvent("wakebridge.core", {
+      type: "core.incident",
+      occurred_at: this.nowIso(),
+      dedupe_key: `incident:${fingerprint}`,
+      coalesce_key: `incident:${input.kind}`,
+      priority_hint: "high",
+      attention_channel_hint: channel,
+      actor_ref: "wakebridge:core",
+      resource: input.resource,
+      metadata: { origin: "core_incident", reason_code: input.kind, ...input.identity },
+      payload_preview: null,
+    });
   }
 
   registerTransport(transport: WakeTransport): void {
@@ -629,9 +668,21 @@ export class WakeBridge {
     const policy = this.policyForEvent(source, clean);
     const eventId = deterministicEventId || id("evt");
     const eventState: EventState = policy.delivery.mode === "suppress" ? "suppressed" : "matched";
-    const claimId = eventState === "matched" ? id("ac") : null;
+    let claimId = eventState === "matched" ? id("ac") : null;
     const channel = claimId ? this.targetChannel(policy, clean) : null;
     const claimState: ClaimState = "pending";
+    let mergedClaim: AttentionClaim | null = null;
+    if (claimId && channel) {
+      const mergeSemantics = stableJson({ delivery: policy.delivery, batch: policy.batch, expires_after_ms: policy.expires_after_ms ?? null });
+      mergedClaim = this.listClaims({ channel, limit: 100_000 }).find((candidate) => {
+        if (!["pending", "deferred", "eligible"].includes(candidate.state) || stableJson(candidate.resource) !== stableJson(clean.resource)) return false;
+        const firstEvent = this.getEvent(candidate.event_ids[0]);
+        const existingPolicy = this.policy(candidate.policy_id, candidate.policy_version);
+        return firstEvent?.source === source && existingPolicy != null
+          && stableJson({ delivery: existingPolicy.delivery, batch: existingPolicy.batch, expires_after_ms: existingPolicy.expires_after_ms ?? null }) === mergeSemantics;
+      }) ?? null;
+      if (mergedClaim) claimId = mergedClaim.id;
+    }
     const statements = [
       `INSERT INTO events(id, instance_id, owner_id, source, type, schema_version, occurred_at, received_at, dedupe_key, coalesce_key, priority_hint, attention_channel_hint, actor_ref, resource_json, metadata_json, payload_preview, matched_policy_id, matched_policy_version)
        VALUES(${sqlValue(eventId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue(this.config.owner_id)}, ${sqlValue(source)}, ${sqlValue(clean.type)}, ${Number(clean.schema_version ?? 1)}, ${sqlValue(clean.occurred_at)}, ${sqlValue(now)}, ${sqlValue(clean.dedupe_key)}, ${sqlValue(clean.coalesce_key)}, ${sqlValue(clean.priority_hint)}, ${sqlValue(clean.attention_channel_hint)}, ${sqlValue(clean.actor_ref)}, ${sqlJson(clean.resource)}, ${sqlJson(clean.metadata ?? {})}, ${sqlValue(clean.payload_preview)}, ${sqlValue(policy.id)}, ${policy.version});`,
@@ -641,7 +692,7 @@ export class WakeBridge {
       `UPDATE event_status SET state=${sqlValue(eventState)}, updated_at=${sqlValue(now)} WHERE event_id=${sqlValue(eventId)};`,
       `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at) VALUES(${sqlValue(eventId)}, ${sqlValue("received")}, ${sqlValue(eventState)}, ${sqlValue(policy.delivery.mode)}, ${sqlValue(now)});`,
     ];
-    if (claimId && channel) {
+    if (claimId && channel && !mergedClaim) {
       const eligibleAfter = this.claimEligibleAfter(policy, this.now());
       const deferPresence = policy.delivery.foreground_presence_policy !== "bypass";
       const expiresAt = this.claimExpiresAt(policy, this.now());
@@ -650,6 +701,10 @@ export class WakeBridge {
          VALUES(${sqlValue(claimId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue("policy")}, ${sqlJson([eventId])}, ${sqlJson(clean.resource)}, ${sqlValue(policy.id)}, ${policy.version}, ${sqlValue(channel)}, ${sqlValue(eligibleAfter)}, ${sqlValue(expiresAt)}, ${deferPresence ? 1 : 0}, ${sqlValue(claimState)}, ${sqlValue(policy.reason_code ?? policy.id)}, NULL, ${sqlValue(now)}, ${sqlValue(now)}, NULL, NULL, NULL);`,
       );
       statements.push(`INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) VALUES(${sqlValue(claimId)}, NULL, ${sqlValue(claimState)}, ${sqlValue("policy")}, ${sqlValue(now)});`);
+    } else if (mergedClaim) {
+      const eventIds = arrayWithoutDuplicates([...mergedClaim.event_ids, eventId]);
+      statements.push(`UPDATE claims SET event_ids_json=${sqlJson(eventIds)}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(mergedClaim.id)} AND state=${sqlValue(mergedClaim.state)};`);
+      statements.push(`INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT ${sqlValue(mergedClaim.id)}, ${sqlValue(mergedClaim.state)}, ${sqlValue(mergedClaim.state)}, 'merge_attention_duplicate', ${sqlValue(now)} WHERE changes()>0;`);
     }
     if (clean.idempotency_key) {
       statements.push(`INSERT OR IGNORE INTO idempotency_keys(scope, key, result_json, created_at) VALUES(${sqlValue(`event:${source}`)}, ${sqlValue(clean.idempotency_key)}, ${sqlJson({ event_id: eventId })}, ${sqlValue(now)});`);
@@ -675,7 +730,7 @@ export class WakeBridge {
     return this.emitEvent(source, input);
   }
 
-  scheduleClaim(input: ScheduleClaimInput): { event: WakeEvent; claim: AttentionClaim; duplicate: boolean } {
+  scheduleClaim(input: ScheduleClaimInput): ScheduleClaimResult {
     validateResource(input.resource);
     const eligibleAfter = isoOrThrow(input.eligible_after, "eligible_after");
     const expiresAt = input.expires_at == null ? null : isoOrThrow(input.expires_at, "expires_at");
@@ -687,7 +742,7 @@ export class WakeBridge {
       const event = this.getEvent(String(existing.id))!;
       const claim = this.listClaims().find((item) => item.event_ids.includes(event.id));
       if (!claim) throw new BridgeError("self commitment event has no claim", "storage_corrupt", 500);
-      return { event, claim, duplicate: true };
+      return { event, claim, duplicate: true, warnings: this.scheduleWarnings(claim.attention_channel) };
     }
     const now = this.nowIso();
     const eventId = `evt_${sha256(`schedule:${this.config.instance_id}:${key}`).slice(0, 32)}`;
@@ -713,12 +768,16 @@ export class WakeBridge {
         if (duplicateEvent) {
           const event = this.getEvent(String(duplicateEvent.id))!;
           const claim = this.listClaims().find((item) => item.event_ids.includes(event.id));
-          if (claim) return { event, claim, duplicate: true };
+          if (claim) return { event, claim, duplicate: true, warnings: this.scheduleWarnings(claim.attention_channel) };
         }
       }
       throw error;
     }
-    return { event: this.getEvent(eventId)!, claim: this.getClaim(claimId)!, duplicate: false };
+    return { event: this.getEvent(eventId)!, claim: this.getClaim(claimId)!, duplicate: false, warnings: this.scheduleWarnings(channel) };
+  }
+
+  private scheduleWarnings(channel: string): ScheduleClaimWarning[] {
+    return this.resolveBinding(channel, this.nowIso()) ? [] : [{ code: "no_current_binding", attention_channel: channel }];
   }
 
   getEvent(eventId: string): WakeEvent | null {
@@ -1133,7 +1192,9 @@ export class WakeBridge {
       throw new BridgeError("wake echo does not match current binding generation", "stale_generation", 409);
     }
     const nonceHash = sha256(input.delivery_nonce);
-    const correlation = this.db.query<DbRow>(`SELECT dc.* FROM delivery_correlations dc JOIN batches b ON b.id=dc.batch_id
+    const correlation = this.db.query<DbRow>(`SELECT dc.*, b.state AS batch_state, b.attempt AS batch_attempt,
+        b.last_error AS batch_last_error, a.attempt_no AS attempt_no
+      FROM delivery_correlations dc JOIN batches b ON b.id=dc.batch_id JOIN outbox_attempts a ON a.id=dc.attempt_id
       WHERE b.instance_id=${sqlValue(this.config.instance_id)} AND dc.endpoint_id=${sqlValue(input.endpoint_id)}
         AND dc.binding_generation=${input.generation} AND dc.nonce_hash=${sqlValue(nonceHash)} LIMIT 1;`)[0];
     if (!correlation) throw new BridgeError("delivery nonce is unknown", "unknown_delivery_nonce", 409);
@@ -1142,9 +1203,30 @@ export class WakeBridge {
       this.db.exec(`UPDATE delivery_correlations SET state='expired' WHERE attempt_id=${sqlValue(correlation.attempt_id)} AND state='outstanding';`);
       throw new BridgeError("delivery nonce has expired", "delivery_nonce_expired", 409);
     }
-    const changed = this.db.query<DbRow>(`UPDATE delivery_correlations SET state='consumed', consumed_at=${sqlValue(now)}
-      WHERE attempt_id=${sqlValue(correlation.attempt_id)} AND state='outstanding' RETURNING attempt_id;`)[0];
-    if (!changed) throw new BridgeError("delivery nonce was already consumed", "delivery_nonce_replayed", 409);
+    if (Number(correlation.batch_attempt) !== Number(correlation.attempt_no)) {
+      throw new BridgeError("delivery nonce belongs to a stale dispatch attempt", "stale_delivery_correlation", 409);
+    }
+    const batchState = String(correlation.batch_state) as BatchState;
+    const lateAck = batchState === "needs_attention" && String(correlation.batch_last_error) === "ack_timeout";
+    const canSetSeen = ["dispatching", "retry_wait", "dead_letter", "dispatched"].includes(batchState) || lateAck;
+    const details = { attested_by: "host", evidence: "delivery_nonce_echo" };
+    const statements = [
+      `UPDATE delivery_correlations SET state='consumed', consumed_at=${sqlValue(now)}
+       WHERE attempt_id=${sqlValue(correlation.attempt_id)} AND state='outstanding';`,
+      `INSERT INTO receipts(id, batch_id, claim_id, stage, at, endpoint_id, binding_generation, transport_kind, details_json)
+       SELECT ${sqlValue(id("rcpt"))}, ${sqlValue(correlation.batch_id)}, NULL, 'host_attested', ${sqlValue(now)}, ${sqlValue(input.endpoint_id)}, ${input.generation}, ${sqlValue(correlation.transport_kind)}, ${sqlJson(details)} WHERE changes()>0;`,
+    ];
+    if (canSetSeen && batchState !== "dispatching") {
+      statements.push(
+        `UPDATE batches SET state='seen', updated_at=${sqlValue(now)}, lease_expires_at=NULL, last_error=NULL
+         WHERE id=${sqlValue(correlation.batch_id)} AND instance_id=${sqlValue(this.config.instance_id)}
+           AND state=${sqlValue(batchState)} AND attempt=${Number(correlation.attempt_no)}
+           ${lateAck ? "AND last_error='ack_timeout'" : ""};`,
+        `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
+         SELECT ${sqlValue(correlation.batch_id)}, ${sqlValue(batchState)}, 'seen', 'host_attested', ${sqlValue(now)} WHERE changes()>0;`,
+      );
+    }
+    this.db.transaction(statements);
     return this.observeActivity({
       attention_channel: input.attention_channel,
       endpoint_id: input.endpoint_id,
@@ -1208,6 +1290,11 @@ export class WakeBridge {
   private recover(): void {
     const now = this.nowIso();
     const ackTimeoutCutoff = addMs(now, -this.config.ack_timeout_ms!);
+    const timedOut = this.db.query<DbRow>(`SELECT b.id FROM batches b JOIN outbox_attempts a ON a.batch_id=b.id
+      WHERE b.instance_id=${sqlValue(this.config.instance_id)} AND b.state='dispatched'
+        AND b.binding_generation IS NOT NULL AND a.state='accepted' AND a.attempt_no=b.attempt
+        AND a.binding_generation=b.binding_generation AND a.finished_at IS NOT NULL
+        AND a.finished_at<=${sqlValue(ackTimeoutCutoff)};`);
     this.db.transaction([
       `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
        SELECT id, 'needs_attention', 'cancelled', 'all_claims_finalized_reconciled', ${sqlValue(now)} FROM batches
@@ -1235,6 +1322,22 @@ export class WakeBridge {
          );`,
       `UPDATE delivery_correlations SET state='expired' WHERE state='outstanding' AND expires_at<${sqlValue(now)};`,
     ]);
+    for (const row of timedOut) {
+      const batch = this.getBatch(String(row.id));
+      if (!batch || batch.state !== "needs_attention" || batch.last_error !== "ack_timeout") continue;
+      if (batch.event_ids.some((eventId) => this.getEvent(eventId)?.source === "wakebridge.core")) continue;
+      try {
+        this.reportCoreIncident({
+          kind: "ack_timeout",
+          identity: { batch_id: batch.id },
+          resource: { uri: `wakebridge://batches/${encodeURIComponent(batch.id)}` },
+        });
+      } catch {
+        // Incident projection is optional observability. The durable timeout
+        // transition remains authoritative and must not be rolled back or
+        // make the dispatcher unavailable when projection itself fails.
+      }
+    }
   }
 
   private materializeDueActivityWatches(now: string): string[] {
@@ -1510,6 +1613,7 @@ export class WakeBridge {
           resource: claim.resource,
           origin: claim.origin,
           reason_code: claim.reason_code,
+          ...(claim.origin === "self_commitment" && claim.note != null ? { note: claim.note } : {}),
         };
       }),
       binding_generation: binding.generation,
@@ -1552,10 +1656,13 @@ export class WakeBridge {
 
   private finalizeAttempt(attemptId: string, batch: WakeBatch, binding: Binding, result: TransportResult, transportKind: string, now: string): DispatchResult {
     const accepted = result.accepted === true;
+    const hostAttested = Boolean(this.db.query<DbRow>(`SELECT 1 AS present FROM delivery_correlations
+      WHERE attempt_id=${sqlValue(attemptId)} AND state='consumed' LIMIT 1;`)[0]);
+    const effectiveAccepted = accepted || hostAttested;
     const retryable = result.retryable !== false;
-    const nextState: BatchState = accepted ? "dispatched" : retryable ? "retry_wait" : "dead_letter";
-    const status: DispatchResult["status"] = accepted ? "accepted" : retryable ? "retry_wait" : "dead_letter";
-    const errorClass = result.error_class || (accepted ? null : "transport_rejected");
+    const nextState: BatchState = hostAttested ? "seen" : accepted ? "dispatched" : retryable ? "retry_wait" : "dead_letter";
+    const status: DispatchResult["status"] = effectiveAccepted ? "accepted" : retryable ? "retry_wait" : "dead_letter";
+    const errorClass = effectiveAccepted ? null : result.error_class || "transport_rejected";
     const errorMessage = result.error_message || null;
     const requestedRetry = result.retry_after_ms;
     const retryDelay = requestedRetry !== undefined
@@ -1563,11 +1670,11 @@ export class WakeBridge {
       && requestedRetry >= 0
       ? Math.min(requestedRetry, 24 * 60 * 60_000)
       : this.config.retry_delay_ms!;
-    const nextNotBefore = accepted ? batch.not_before : addMs(now, retryDelay);
+    const nextNotBefore = effectiveAccepted ? batch.not_before : addMs(now, retryDelay);
     const statements = [
-      `UPDATE outbox_attempts SET state=${sqlValue(accepted ? "accepted" : "failed")}, transport_kind=${sqlValue(result.transport_kind || transportKind)}, finished_at=${sqlValue(now)}, error_class=${sqlValue(errorClass)}, error_message=${sqlValue(errorMessage)} WHERE id=${sqlValue(attemptId)} AND state='leased';`,
+      `UPDATE outbox_attempts SET state=${sqlValue(effectiveAccepted ? "accepted" : "failed")}, transport_kind=${sqlValue(result.transport_kind || transportKind)}, finished_at=${sqlValue(now)}, error_class=${sqlValue(errorClass)}, error_message=${sqlValue(hostAttested ? null : errorMessage)} WHERE id=${sqlValue(attemptId)} AND state='leased';`,
     ];
-    if (!accepted) statements.push(`UPDATE delivery_correlations SET state='discarded' WHERE attempt_id=${sqlValue(attemptId)} AND state='outstanding';`);
+    if (!effectiveAccepted) statements.push(`UPDATE delivery_correlations SET state='discarded' WHERE attempt_id=${sqlValue(attemptId)} AND state='outstanding';`);
     if (accepted) {
       // Insert the accepted receipt while the attempt id still owns the
       // dispatching row.  A late worker whose lease was reclaimed cannot
@@ -1580,7 +1687,7 @@ export class WakeBridge {
     }
     statements.push(`UPDATE batches SET state=${sqlValue(nextState)}, not_before=${sqlValue(nextNotBefore)}, lease_expires_at=NULL, updated_at=${sqlValue(now)}, last_error=${sqlValue(errorClass)} WHERE id=${sqlValue(batch.id)} AND state='dispatching' AND last_error=${sqlValue(attemptId)};`);
     statements.push(
-      `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at) SELECT ${sqlValue(batch.id)}, 'dispatching', ${sqlValue(nextState)}, ${sqlValue(errorClass || "transport_accepted")}, ${sqlValue(now)} WHERE changes()>0;`,
+      `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at) SELECT ${sqlValue(batch.id)}, 'dispatching', ${sqlValue(nextState)}, ${sqlValue(hostAttested ? "host_attested" : errorClass || "transport_accepted")}, ${sqlValue(now)} WHERE changes()>0;`,
     );
     this.db.transaction(statements);
     const current = this.getBatch(batch.id);
@@ -1728,19 +1835,35 @@ export class WakeBridge {
   ackBatch(batchId: string, endpointId: string, generation: number): WakeBatch {
     const batch = this.getBatch(batchId);
     if (!batch) throw new BridgeError("batch not found", "batch_not_found", 404);
-    if (batch.state === "seen") return batch;
+    const accepted = this.acceptedAttempt(batchId, batch.attempt);
+    const acceptedMatches = Boolean(accepted && String(accepted.endpoint_id) === endpointId && Number(accepted.binding_generation) === generation);
+    const binding = this.getBinding(batch.attention_channel);
+    const bindingMatches = Boolean(binding && binding.endpoint_id === endpointId && binding.generation === generation);
+    if (batch.state === "seen") {
+      const receipts = this.listReceipts(batchId);
+      if (receipts.some((receipt) => receipt.stage === "agent_seen")) return batch;
+      if (!receipts.some((receipt) => receipt.stage === "host_attested")) return batch;
+      if (!acceptedMatches || !bindingMatches) throw new BridgeError("batch acknowledgement is fenced by endpoint/generation", "stale_generation", 409);
+      const now = this.nowIso();
+      this.db.transaction([
+        `INSERT INTO receipts(id, batch_id, claim_id, stage, at, endpoint_id, binding_generation, transport_kind, details_json)
+         SELECT ${sqlValue(id("rcpt"))}, ${sqlValue(batchId)}, NULL, 'agent_seen', ${sqlValue(now)}, ${sqlValue(endpointId)}, ${generation}, ${sqlValue(String(accepted!.transport_kind || "unknown"))}, ${sqlJson({ after: "host_attested" })}
+         WHERE NOT EXISTS (SELECT 1 FROM receipts WHERE batch_id=${sqlValue(batchId)} AND stage='agent_seen');`,
+        `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
+         SELECT ${sqlValue(batchId)}, 'seen', 'seen', 'agent_ack', ${sqlValue(now)} WHERE changes()>0;`,
+      ]);
+      return this.getBatch(batchId)!;
+    }
     const lateAck = batch.state === "needs_attention" && batch.last_error === "ack_timeout";
     if (batch.state !== "dispatched" && !lateAck) throw new BridgeError("batch acknowledgement is not available", "batch_not_ready", 409);
     // The accepted attempt must be the one that finalized this batch.  A
     // previous accepted attempt may still be present after lease recovery;
     // accepting its late acknowledgement would incorrectly mark a retry as
     // seen.
-    const accepted = this.acceptedAttempt(batchId, batch.attempt);
-    if (!accepted || String(accepted.endpoint_id) !== endpointId || Number(accepted.binding_generation) !== generation) {
+    if (!accepted || !acceptedMatches) {
       throw new BridgeError("batch acknowledgement is fenced by endpoint/generation", "stale_generation", 409);
     }
-    const binding = this.getBinding(batch.attention_channel);
-    if (!binding || binding.endpoint_id !== endpointId || binding.generation !== generation) throw new BridgeError("batch acknowledgement targets stale binding", "stale_generation", 409);
+    if (!bindingMatches) throw new BridgeError("batch acknowledgement targets stale binding", "stale_generation", 409);
     const now = this.nowIso();
     this.db.transaction([
       `UPDATE batches SET state='seen', updated_at=${sqlValue(now)}, lease_expires_at=NULL, last_error=${lateAck ? "NULL" : "last_error"}

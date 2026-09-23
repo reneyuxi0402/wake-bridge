@@ -138,11 +138,17 @@ Foreground Presence Lease；Core 会同时核对 capability、endpoint token 与
 调用会 fail closed。
 
 若 manifest 声明 `session_activity_observable`，外部 service 可以调用 `observeActivity()` 上报真实用户/runner activity，也可以在确认
-delivery nonce 确实进入相同 generation 后调用 `consumeWakeEcho()`。Wake echo 只建立可信 `wake_started` activity，不冒充
-`agent_seen`；batch 的 seen/consumed/acted 仍需 agent/harness 通过既有明确 acknowledgement 完成。
+delivery nonce 确实进入相同 generation 后调用 `consumeWakeEcho()`。Core 会消费这个一次性 nonce，记录独立的
+`host_attested` receipt，并把对应当前 attempt 的 batch 收尾为 `seen`；这表示可信 host 已把该 wake 注入目标 session，仍不等于
+agent 理解、消费或执行了其中工作。agent 随后显式 `attention_ack` 时，Core 会在同一 `seen` batch 上补记独立的
+`agent_seen` receipt；`agent_consumed` / `agent_acted` 仍只能由 agent/harness 对具体 claim 明确记录。
+
+nonce echo 可以和原 transport request 并发发生：若 host 已证明注入，但 HTTP 202 回程超时，Core 以更强的 host 证明收尾，避免
+误重投。nonce、endpoint、binding generation 与 attempt 任一不匹配都会 fail closed；不存在可由 adapter 任意指定 batch id 的 ack
+入口。
 
 自 preview.10 起，Core 默认在接受投递 30 分钟后仍无 agent ack 时标记 `needs_attention` / `ack_timeout`，而不是重新发送已接受的
-delivery。该时限可由 operator 配置；合法的迟到 ack 仍可收尾，但 generation fencing 不变。Adapter 的 busy queue、
+delivery。该时限可由 operator 配置；合法的迟到 agent ack 或当前 attempt 的 nonce echo 仍可收尾，但 generation fencing 不变。Adapter 的 busy queue、
 实际注入与换窗处置仍由 adapter 负责；ack/consume/dismiss 不表示 Core 能撤回 adapter 已接收的消息。
 
 ## 5. 支持边界

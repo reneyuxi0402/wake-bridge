@@ -92,6 +92,7 @@ function mergedConfig(options: Args): BridgeConfig {
     activity_ttl_ms: optionalNumber(process.env.WAKEBRIDGE_ACTIVITY_TTL_MS, "WAKEBRIDGE_ACTIVITY_TTL_MS"),
     endpoint_lease_ms: optionalNumber(process.env.WAKEBRIDGE_ENDPOINT_LEASE_MS, "WAKEBRIDGE_ENDPOINT_LEASE_MS"),
     ack_timeout_ms: optionalNumber(process.env.WAKEBRIDGE_ACK_TIMEOUT_MS, "WAKEBRIDGE_ACK_TIMEOUT_MS"),
+    incident_attention_channel: process.env.WAKEBRIDGE_INCIDENT_ATTENTION_CHANNEL || undefined,
   };
 }
 
@@ -117,6 +118,7 @@ function configFrom(options: Args): BridgeConfig {
     activity_ttl_ms: optionalNumber(process.env.WAKEBRIDGE_ACTIVITY_TTL_MS, "WAKEBRIDGE_ACTIVITY_TTL_MS"),
     endpoint_lease_ms: optionalNumber(process.env.WAKEBRIDGE_ENDPOINT_LEASE_MS, "WAKEBRIDGE_ENDPOINT_LEASE_MS"),
     ack_timeout_ms: optionalNumber(process.env.WAKEBRIDGE_ACK_TIMEOUT_MS, "WAKEBRIDGE_ACK_TIMEOUT_MS") ?? stored.ack_timeout_ms,
+    incident_attention_channel: process.env.WAKEBRIDGE_INCIDENT_ATTENTION_CHANNEL || stored.incident_attention_channel,
   };
 }
 

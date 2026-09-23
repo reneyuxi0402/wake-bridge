@@ -22,7 +22,7 @@ export type BatchState =
   | "needs_attention"
   | "dead_letter";
 export type AttemptState = "leased" | "accepted" | "failed" | "expired";
-export type ReceiptStage = "transport_accepted" | "agent_completed" | "agent_seen" | "agent_consumed" | "agent_acted";
+export type ReceiptStage = "transport_accepted" | "host_attested" | "agent_completed" | "agent_seen" | "agent_consumed" | "agent_acted";
 export type SourceReadSideEffects = "none" | "marks_read" | "consumes" | "unknown";
 export type SourceCredentialCustody = "none" | "connector" | "wake_bridge_process";
 export type SourceUpstreamCredentialBreadth = "none" | "read_only" | "broad" | "unknown";
@@ -289,6 +289,8 @@ export interface BridgeConfig {
   endpoint_lease_ms?: number;
   dispatch_lease_ms?: number;
   ack_timeout_ms?: number;
+  /** Optional channel for deduplicated Wake Bridge operator incidents. */
+  incident_attention_channel?: string;
   retry_delay_ms?: number;
   batch_window_ms?: number;
   default_policy?: PolicyRule;
@@ -475,6 +477,8 @@ export interface WakeBriefClaim {
   resource: ResourceRef;
   origin: ClaimOrigin;
   reason_code: string;
+  /** Owner-authored handoff text is exposed only for self commitments. */
+  note?: string;
 }
 
 export interface WakePayload {

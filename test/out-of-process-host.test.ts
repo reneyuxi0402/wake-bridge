@@ -198,7 +198,16 @@ describe("out-of-process local Host Adapter protocol", () => {
         observation_id: "wake-echo-one",
         delivery_nonce: deliveries[0].delivery_nonce,
       })).resolves.toMatchObject({ duplicate: false });
-      expect(bridge.getBatch(deliveries[0].wake.wake_batch_id)).toMatchObject({ state: "dispatched" });
+      expect(bridge.getBatch(deliveries[0].wake.wake_batch_id)).toMatchObject({ state: "seen" });
+      expect(bridge.listReceipts(deliveries[0].wake.wake_batch_id)).toContainEqual(expect.objectContaining({
+        stage: "host_attested",
+        details: { attested_by: "host", evidence: "delivery_nonce_echo" },
+      }));
+      bridge.ackBatch(deliveries[0].wake.wake_batch_id, lease.endpoint_id, lease.generation);
+      expect(bridge.listReceipts(deliveries[0].wake.wake_batch_id)).toContainEqual(expect.objectContaining({
+        stage: "agent_seen",
+        details: { after: "host_attested" },
+      }));
       expect(bridge.listDeliveryCorrelations()).toMatchObject([{ state: "consumed", transport_kind: "fixture_host_bridge" }]);
 
       await expect(client.renewPresence(lease, {

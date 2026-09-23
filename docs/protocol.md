@@ -598,7 +598,8 @@ loopback origin 与独立 route token；bootstrap token 与 route token 不得�
 
 Core dispatch 使用 `POST /v1/wakes`，body 为 `protocol_version=1 + attempt_id + delivery_nonce + WakePayload`。只有 HTTP 202
 表示 adapter 声明的 pipe/host accepted；408/425/429/5xx 为 retryable，其余为 permanent。Response body 不被读取或写入 durable
-state。该 transport 只创建 `transport_accepted`；wake echo 只建立可信 activity correlation，不冒充 agent seen/completed。
+state。该 transport 的 HTTP 202 只创建 `transport_accepted`；当前 attempt 的一次性 wake echo 创建独立的
+`host_attested` 并可把 batch 收尾为 `seen`，但不冒充 agent seen/completed。
 
 协议只接受 loopback HTTP、拒绝 redirect 与 URL credential/path/query。它不加载第三方代码，不发现 session，不访问 runtime DB，
 也不把某个实现协议的 runtime 自动列为 supported host。
@@ -608,6 +609,7 @@ state。该 transport 只创建 `transport_accepted`；wake echo 只建立可信
 receipt stages：
 
 - `transport_accepted`；
+- `host_attested`；
 - `agent_completed`；
 - `agent_seen`；
 - `agent_consumed`；
@@ -632,10 +634,12 @@ dispatching
 
 dispatched
   ├─ agent ack ───────────→ seen
+  ├─ fenced host nonce echo → seen
   └─ ack timeout ─────────→ needs_attention
 
 needs_attention (ack_timeout only)
-  └─ valid late agent ack → seen
+  ├─ valid late agent ack → seen
+  └─ valid late host echo → seen
 ```
 
 状态更新记录 attempt id；迟到 worker 不能覆盖新状态。
@@ -645,8 +649,13 @@ needs_attention (ack_timeout only)
 将超时的 `dispatched` batch 转为 `needs_attention`，原因是 `ack_timeout`。只读 observer 不执行此转换。
 
 超时表示缺少确认，不证明宿主未投递，因此不自动重投、不修改 Claim/Event，也不补造 `agent_seen` 或
-`agent_consumed` receipt。当前 binding 的原 accepted attempt 仍可用真实的迟到 ack 收尾；endpoint、generation
+`agent_consumed` receipt。当前 binding 的原 accepted attempt 仍可用真实的迟到 agent ack 或一次性 nonce echo 收尾；后者写入
+`host_attested`，不会冒充 agent 行为。endpoint、generation
 与 attempt fencing 不变，旧窗口不能替新窗口确认。旧版本留下的 accepted batch 按同一规则检查，无需 schema migration。
+
+可选的 `incident_attention_channel`（或 `WAKEBRIDGE_INCIDENT_ATTENTION_CHANNEL`）会把新发生的 `ack_timeout` 与 source
+`needs_attention` 投影成去重的 `wakebridge.core/core.incident` Event + Claim。默认关闭。Core incident 自身的确认超时不再生成
+incident，防止递归；相同 source error episode 以 source、error class、checkpoint revision 与最近成功时间去重。
 
 `cancelled` 是未投递 batch 的可审计终态：其中最后一个 claim 在其他路径被 consume/dismiss/expire 后，batch 不再有工作可做。
 这不是 operator incident，不计入 `needs_attention`。

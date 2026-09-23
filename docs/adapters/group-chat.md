@@ -34,6 +34,11 @@ adapter 是 anti-corruption layer：验证 Group Chat schema，再转换成通�
 
 adapter 不需要 Group Chat 管理员 credential。
 
+同一条消息可能同时产生 reply 与 direct mention 两个独立 feed event。Core 保留两条 Event 审计，但对同一 source、同一
+resource、同一 attention channel 且 delivery/batch 语义兼容的尚未冻结 attention 合并为一个 Claim；因此只需要一次
+consume/dismiss。Claim 冻结进 batch 后，同一 resource 上后来发生的新事件仍会创建新的 attention，不会被旧 batch 吞掉；若
+两条 policy 的调度或 gate 语义不同，也不会为了去重而偷偷改变其中一条。
+
 ## v1 映射
 
 | Group Chat event | Wake source/type | coalesce key | 默认 channel hint |

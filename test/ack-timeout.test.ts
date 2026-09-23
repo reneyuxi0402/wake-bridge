@@ -107,6 +107,34 @@ describe("accepted wake acknowledgement timeout", () => {
     }
   });
 
+  it("emits one configured core incident for an ack timeout without recursively alerting on that incident", async () => {
+    const clock = new TestClock();
+    const bridge = setupBridge(clock, { ack_timeout_ms: 10_000, incident_attention_channel: "default" });
+    try {
+      const original = await dispatchAccepted(bridge);
+      clock.advance(10_000);
+      await bridge.dispatchDue();
+
+      const incidents = bridge.listEvents({ source: "wakebridge.core" });
+      expect(incidents).toMatchObject([{
+        type: "core.incident",
+        attention_channel_hint: "default",
+        metadata: { reason_code: "ack_timeout", batch_id: original.id },
+      }]);
+      bridge.tick();
+      await bridge.dispatchDue();
+      const incidentBatch = bridge.listBatches().find((batch) => batch.event_ids.includes(incidents[0].id));
+      expect(incidentBatch?.state).toBe("dispatched");
+
+      clock.advance(10_000);
+      await bridge.dispatchDue();
+      expect(bridge.getBatch(incidentBatch!.id)).toMatchObject({ state: "needs_attention", last_error: "ack_timeout" });
+      expect(bridge.listEvents({ source: "wakebridge.core" })).toHaveLength(1);
+    } finally {
+      bridge.close();
+    }
+  });
+
   it("starts the timeout after a slow transport completes, not when dispatch starts", async () => {
     const clock = new TestClock();
     const transport = new SlowTransport();
@@ -139,6 +167,49 @@ describe("accepted wake acknowledgement timeout", () => {
       clock.advance(1);
       await bridge.dispatchDue();
       expect(bridge.getBatch(batch.id)).toMatchObject({ state: "needs_attention", last_error: "ack_timeout" });
+    } finally {
+      bridge.close();
+    }
+  });
+
+  it("lets an exact nonce echo attest delivery even before the transport call settles", async () => {
+    const clock = new TestClock();
+    let bridge!: WakeBridge;
+    let leaseToken = "";
+    const transport: WakeTransport = {
+      kind: "echoing",
+      capabilities: { cold_push: true, session_activity_observable: true },
+      dispatch(context: TransportContext): TransportResult {
+        bridge.consumeWakeEcho({
+          attention_channel: context.binding.attention_channel,
+          endpoint_id: context.endpoint.id,
+          generation: context.binding.generation,
+          lease_token: leaseToken,
+          observation_id: "echo-before-return",
+          delivery_nonce: context.delivery_nonce,
+        });
+        return { accepted: false, retryable: true, error_class: "transport_timeout" };
+      },
+    };
+    bridge = new WakeBridge(config(dbPath()), { clock: clock.now, transports: [transport], autoMockTransport: false });
+    try {
+      const endpoint = bridge.registerEndpoint({
+        host_kind: "echoing",
+        session_ref: "echo-session",
+        capabilities: { cold_push: true, session_activity_observable: true },
+        routes: [{ kind: "echoing", address: {} }],
+      });
+      leaseToken = endpoint.lease_token!;
+      bridge.takeover("default", endpoint.id, 0);
+      bridge.emit("manual", { type: "ack.echo", dedupe_key: "ack:echo", resource: { uri: "ack://echo" } });
+      bridge.tick();
+
+      await expect(bridge.dispatchDue()).resolves.toMatchObject([{ status: "accepted" }]);
+      const batch = bridge.listBatches()[0];
+      expect(batch).toMatchObject({ state: "seen", last_error: null });
+      expect(bridge.listReceipts(batch.id)).toContainEqual(expect.objectContaining({ stage: "host_attested" }));
+      expect(bridge.db.query(`SELECT reason FROM batch_transitions WHERE batch_id='${batch.id}' ORDER BY seq DESC LIMIT 1`))
+        .toEqual([{ reason: "host_attested" }]);
     } finally {
       bridge.close();
     }

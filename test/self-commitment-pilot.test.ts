@@ -37,6 +37,7 @@ describe("self-commitment pilot", () => {
       source: "self_commitment",
       origin: "self_commitment",
       resource: { uri: "memory://thought/self-pilot" },
+      note: "做完梦后重新判断",
     }]);
     const batch = second.listBatches()[0];
     second.ackBatch(batch.id, endpoint.id, binding.generation);

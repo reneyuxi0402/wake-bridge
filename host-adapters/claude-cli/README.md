@@ -11,9 +11,11 @@ This adapter is part of the experimental `wake-bridge` npm preview, not a stable
 - Start stock Claude through `wakebridge-claude launch`; only that session receives channel notifications.
 - SessionStart registers the exact session; renew keeps its lease live; exit closes it. A later explicit launch takes over the configured attention channel.
 - Busy notifications use Claude's own channel queue. This adapter does not steer an in-flight turn or maintain a second durable queue.
-- A successful delivery means `accepted_to_live_pipe`, not that Claude read or processed it.
-- Claude must explicitly call the separate `wakebridge` MCP's `attention_ack` for each batch it receives. `attention_consume` is separate and appropriate only after a claim is actually handled.
-- No cold launch, automatic resume, window discovery, terminal keystroke injection, permission relay, or automatic acknowledgement.
+- HTTP delivery means `accepted_to_live_pipe`, not that Claude read or processed it. A later exact channel hook echoes the one-shot nonce as
+  `host_attested`; this proves injection into the bound session, not understanding or action.
+- Claude should still call the separate `wakebridge` MCP's `attention_ack` for each batch it receives so Core can record the stronger
+  `agent_seen` evidence. `attention_consume` is separate and appropriate only after a claim is actually handled.
+- No cold launch, automatic resume, window discovery, terminal keystroke injection, permission relay, or automatic agent acknowledgement.
 
 An ordinary Claude session already running without this adapter cannot be attached retroactively. Exit and relaunch that session through the launcher if you want this route. Launching another session on the same attention channel is an explicit takeover, not broadcast.
 

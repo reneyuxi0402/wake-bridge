@@ -496,7 +496,7 @@ export class WakeBridgeMcpServer {
           idempotency_key: asOptionalString(args, "idempotency_key", 500),
           defer_while_presence: asOptionalBoolean(args, "defer_while_presence"),
         });
-        return { claim: compactClaim(scheduled.claim), event_id: scheduled.event.id, duplicate: scheduled.duplicate };
+        return { claim: compactClaim(scheduled.claim), event_id: scheduled.event.id, duplicate: scheduled.duplicate, warnings: scheduled.warnings };
       }
       case "attention_ack": {
         assertAllowed(args, ["wake_batch_id", "batch_id"]);

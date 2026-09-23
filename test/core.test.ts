@@ -376,6 +376,42 @@ describe("Wake Bridge M1 core", () => {
     expect(first.event.source).toBe("self_commitment");
     expect(first.claim.origin).toBe("self_commitment");
     expect(first.claim.defer_while_presence).toBe(true);
+    expect(first.warnings).toEqual([{ code: "no_current_binding", attention_channel: "life" }]);
+    b.close();
+  });
+
+  it("preserves simultaneous source events while merging duplicate attention for one resource and channel", () => {
+    const clock = new TestClock("2026-09-10T01:02:03.000Z");
+    const b = bridge(clock);
+    b.installPolicies([
+      { id: "direct-mention", version: 1, order: 100, match: { source: "group_chat", type: "mention" }, delivery: { mode: "immediate" }, batch: { coalesce_by: "coalesce_key", max_events: 20, window_ms: 0 }, reason_code: "direct_mention" },
+      { id: "direct-reply", version: 1, order: 100, match: { source: "group_chat", type: "reply" }, delivery: { mode: "immediate" }, batch: { coalesce_by: "coalesce_key", max_events: 20, window_ms: 0 }, reason_code: "direct_reply" },
+      { id: "delayed", version: 1, order: 100, match: { source: "group_chat", type: "delayed" }, delivery: { mode: "scheduled", scheduled_local_time: "03:00" }, batch: { coalesce_by: "coalesce_key", max_events: 20, window_ms: 0 }, reason_code: "delayed" },
+    ]);
+    const common = {
+      occurred_at: "2026-09-10T01:02:00.000Z",
+      attention_channel_hint: "group:home",
+      resource: { uri: "group-chat://room_home/messages/msg_0417" },
+      coalesce_key: "group:room_home",
+    };
+    const mention = b.emit("group_chat", { ...common, type: "mention", dedupe_key: "event:mention" });
+    const reply = b.emit("group_chat", { ...common, type: "reply", dedupe_key: "event:reply" });
+
+    expect(b.listEvents({ source: "group_chat" })).toHaveLength(2);
+    expect(b.listClaims()).toHaveLength(1);
+    expect(reply.claim?.id).toBe(mention.claim?.id);
+    expect(b.getClaim(mention.claim!.id)?.event_ids).toEqual([mention.event.id, reply.event.id]);
+    expect(b.db.query(`SELECT reason FROM claim_transitions WHERE claim_id='${mention.claim!.id}' ORDER BY seq`))
+      .toContainEqual({ reason: "merge_attention_duplicate" });
+
+    const other = { ...common, resource: { uri: "group-chat://room_home/messages/msg_other" } };
+    b.emit("group_chat", { ...other, type: "mention", dedupe_key: "event:other-mention" });
+    b.emit("group_chat", { ...other, type: "delayed", dedupe_key: "event:other-delayed" });
+    expect(b.listClaims()).toHaveLength(3);
+
+    b.tick();
+    b.emit("group_chat", { ...common, occurred_at: "2026-09-10T01:03:00.000Z", type: "reply", dedupe_key: "event:later" });
+    expect(b.listClaims()).toHaveLength(4);
     b.close();
   });
 

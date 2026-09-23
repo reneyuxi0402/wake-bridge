@@ -307,6 +307,8 @@ channel.inactive Event + Claim`，随后复用同一套 gates、batch、binding 
 ```
 
 payload 不复制邮件正文、群聊上下文、小机知道正文或来源 credential。
+只有 `self_commitment` 可以额外携带 agent 自己写入、最长 500 字的 `note`，作为未来自己的交接文本；普通 source claim 不开放
+这一正文通道。
 
 ## 5. endpoint 选择算法
 

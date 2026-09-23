@@ -369,6 +369,21 @@ export class SourceSupervisor {
       if (retryable) {
         return Math.min(slot.config.max_backoff_ms, slot.config.poll_interval_ms * (2 ** Math.min(10, slot.status.consecutive_failures - 1)));
       }
+      try {
+        this.runner.bridge.reportCoreIncident({
+          kind: "source_needs_attention",
+          identity: {
+            source: slot.config.id,
+            error_class: errorClass,
+            checkpoint_revision: slot.status.checkpoint_revision,
+            last_success_at: slot.status.last_success_at,
+          },
+          resource: { uri: `wakebridge://sources/${encodeURIComponent(slot.config.id)}` },
+        });
+      } catch {
+        // Optional incident projection cannot replace or mask the source's
+        // authoritative needs_attention state and original error class.
+      }
       return null;
     }
   }

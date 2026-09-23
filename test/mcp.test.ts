@@ -77,6 +77,7 @@ describe("Wake Bridge stdio MCP", () => {
       idempotency_key: "mcp-schedule-1",
     });
     expect(scheduled.claim).toMatchObject({ id: expect.any(String), state: "pending", attention_channel: "life", resource: { uri: "memory://thought/mcp" } });
+    expect(scheduled.warnings).toEqual([{ code: "no_current_binding", attention_channel: "life" }]);
     expect(b.getClaim(scheduled.claim.id)?.state).toBe("pending");
     const duplicate = await call(server, 2, "attention_schedule", {
       resource: "memory://other",
@@ -86,6 +87,7 @@ describe("Wake Bridge stdio MCP", () => {
     });
     expect(duplicate.duplicate).toBe(true);
     expect(duplicate.claim.id).toBe(scheduled.claim.id);
+    expect(duplicate.warnings).toEqual([{ code: "no_current_binding", attention_channel: "life" }]);
     const listed = await call(server, 3, "attention_list", { state: "pending", channel: "life" });
     expect(listed.claims).toHaveLength(1);
     const snoozed = await call(server, 4, "attention_snooze", { claim_id: scheduled.claim.id, until: new Date(Date.now() + 120_000).toISOString() });

@@ -61,6 +61,13 @@ needs-attention 摘要；agent 可用 `attention_wake_health` 查看 accepted �
   不要为清空异常而伪造 ack。
 - 升级后，已有的超时记录会在 dispatcher 恢复/扫描时按相同规则暴露出来。这不是新增投递，也不要求修改数据库 schema。
 
+若希望这些状态主动进入某个运维 attention channel，可在实例配置写入 `incident_attention_channel`，或设置
+`WAKEBRIDGE_INCIDENT_ATTENTION_CHANNEL`。该功能默认关闭；启用后只为新检测到的 `ack_timeout` 与 source
+`needs_attention` 创建去重的 `wakebridge.core` claim。Core incident 自身超时不会再次创建 incident，避免递归告警。
+
+支持 session activity 的 Host Adapter 可用当前 generation 的一次性 delivery nonce 回报 `host_attested`。这会将 batch 收尾为
+`seen` 并解除 `ack_timeout`，但不会生成 `agent_seen`、`agent_consumed` 或 `agent_acted`。
+
 ## Dead-letter retry
 
 先读取 dead letter 的 `batch_id` 与当前 `attempt`，修复导致 permanent rejection 的 route、credential 或 provider configuration，

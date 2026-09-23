@@ -109,7 +109,9 @@ wakebridge mcp --config /absolute/private/path/wakebridge/my-agent/wakebridge.co
 
 运行 daemon 时，再通过 `WAKEBRIDGE_DAEMON_URL=http://127.0.0.1:4311` 让 MCP 的 Source control 工具访问同一个 authenticated daemon。不要把 owner token、Host Adapter token 或 provider credential 放进 prompt。
 
-agent 可以用 `attention_schedule` 为未来的自己建立 durable self-commitment。`eligible_after` 必须是带 `Z` 或数字 offset 的绝对 RFC3339 时间，`resource` 应指向未来醒来后可重新读取的权威位置；重复提交应复用稳定的 `idempotency_key`。
+agent 可以用 `attention_schedule` 为未来的自己建立 durable self-commitment。`eligible_after` 必须是带 `Z` 或数字 offset 的绝对 RFC3339 时间，`resource` 应指向未来醒来后可重新读取的权威位置；重复提交应复用稳定的 `idempotency_key`。若目标 channel 当前没有 live binding，调度仍会成功，但结果带
+`warnings: [{"code":"no_current_binding", ...}]`；这是当前状态提示，不表示 endpoint 在到期前一定不会上线。self-commitment 的
+`note` 会作为有界、owner-authored handoff 随 wake claim reference 返回；外部 source claim 不复制正文或任意 note。
 
 可信 Host Adapter 观察到绑定 session 中真实用户消息被接受时，可以调用 `renewPresence()`。默认 policy 会在 presence lease 有效期内延后普通后台 claim，租约到期后自动重新进入调度；进程存活、窗口 focus、模型输出或 Wake 自己都不能冒充用户在场。
 

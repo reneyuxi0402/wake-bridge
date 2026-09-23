@@ -20,6 +20,7 @@ export interface WakeBridgeInstanceConfigFile {
   timezone: string;
   admin_token: string;
   ack_timeout_ms?: number;
+  incident_attention_channel?: string;
 }
 
 export interface InitializeInstanceOptions {
@@ -205,6 +206,7 @@ export function bridgeConfigFromFile(path: string): BridgeConfig {
     timezone: config.timezone,
     admin_token: config.admin_token,
     ...(config.ack_timeout_ms === undefined ? {} : { ack_timeout_ms: config.ack_timeout_ms }),
+    ...(config.incident_attention_channel === undefined ? {} : { incident_attention_channel: config.incident_attention_channel }),
   };
 }
 
