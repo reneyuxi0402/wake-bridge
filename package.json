@@ -1,6 +1,6 @@
 {
   "name": "wake-bridge",
-  "version": "0.9.0-preview.10",
+  "version": "0.9.0-preview.11",
   "description": "Local-first durable attention scheduler and wake bridge for agent harnesses",
   "license": "Apache-2.0",
   "repository": {
@@ -61,10 +61,16 @@
     "docs/operations/templates/sources.json.example",
     "docs/operations/templates/botlingknows-connector.env.example",
     "docs/releases/0.9.0-preview.9.md",
-    "docs/releases/0.9.0-preview.10.md"
+    "docs/releases/0.9.0-preview.10.md",
+    "docs/releases/0.9.0-preview.11.md",
+    "host-adapters/claude-cli/src",
+    "host-adapters/claude-cli/examples/host-adapters.json",
+    "host-adapters/claude-cli/docs/verification.md",
+    "host-adapters/claude-cli/README.md"
   ],
   "bin": {
-    "wakebridge": "dist/src/cli.js"
+    "wakebridge": "dist/src/cli.js",
+    "wakebridge-claude": "host-adapters/claude-cli/src/cli.mjs"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -83,7 +89,7 @@
     "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
     "pretest": "npm run build",
-    "test": "vitest run --testTimeout=30000 --pool=forks --poolOptions.forks.singleFork",
+    "test": "vitest run --exclude='host-adapters/claude-cli/test/**' --testTimeout=30000 --pool=forks --poolOptions.forks.singleFork && node --test host-adapters/claude-cli/test/*.test.mjs",
     "dev": "tsx src/cli.ts"
   },
   "dependencies": {},

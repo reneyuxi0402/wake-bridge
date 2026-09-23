@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "adapters": [{
+    "id": "claude-cli-local",
+    "adapter_kind": "claude_cli_channel",
+    "adapter_version": "0.1.0-preview.1",
+    "host_kind": "claude_cli",
+    "tested_host_versions": ["2.1.270"],
+    "token_env": "WAKEBRIDGE_CLAUDE_HOST_TOKEN",
+    "attention_channels": ["default"],
+    "capabilities": {
+      "warm_resume": true,
+      "cold_push": false,
+      "exact_live_route": true,
+      "requires_live_binding": true,
+      "queue_when_busy": true,
+      "foreground_presence_observable": true,
+      "session_activity_observable": true
+    },
+    "receipt_upper_bound": "accepted_to_live_pipe"
+  }]
+}

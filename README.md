@@ -13,6 +13,7 @@ Wake Bridge 是一个 local-first 的 **agent attention scheduler and delivery c
 - source-scoped ingress、Source Connector checkpoint 与身份 fencing；
 - versioned event/source/transport SDK；
 - out-of-process loopback Host Adapter Contract；
+- 可选的 Claude CLI 在线会话 Host Adapter（Claude custom channels research preview）；
 - 单 Agent Principal / 单 Agent Space / 单 daemon 的本地部署。
 
 当前公开边界见 [架构与路由](docs/architecture.md) 和
@@ -22,9 +23,9 @@ Wake Bridge 是一个 local-first 的 **agent attention scheduler and delivery c
 
 从 [First Wake Quickstart](docs/quickstart.md) 开始。它覆盖 clean install、Agent Space 初始化、仓库外 Host Adapter、第一条受控 wake、MCP、presence、self-commitment 与可选 Source Connector。完整公共文档见 [文档导航](docs/README.md)。
 
-`0.9.0-preview.9` 是当前公开 pre-release，发布在 npm 的 `preview` channel。它增加 Linux systemd user service；已在
+`0.9.0-preview.11` 是当前公开 pre-release，发布在 npm 的 `preview` channel。它内置可选的 Claude CLI 在线会话 Host Adapter；已在
 Ubuntu 22.04 LTS x64 实机完成连续两轮 reboot canary，并在 Ubuntu 24.04 x64 CI 验证。Wake Bridge 本身不内置任何具体
-agent 产品 Host Adapter；使用者必须已有或实现一个能精确控制目标 session 的 adapter。
+agent runtime；未列入官方 adapter 的宿主仍须已有或实现一个能精确控制目标 session 的 adapter。
 
 ## 为什么有 Wake Bridge
 
@@ -125,7 +126,7 @@ Source Connector 的本地协议、身份 fencing、cursor CAS 与错误处理�
 
 ## Preview 安装
 
-当前 package 名称为 `wake-bridge`，发布 channel 为 `preview`。`0.9.0-preview.9` 支持 macOS arm64/x64，以及带 systemd
+当前 package 名称为 `wake-bridge`，发布 channel 为 `preview`。`0.9.0-preview.11` 支持 macOS arm64/x64，以及带 systemd
 user service 的 Linux x64；需要 Node.js 20+ 与 SQLite CLI 3.33+。Linux 实机证据来自 Ubuntu 22.04 LTS x64，Ubuntu
 24.04 x64 当前只有 CI 证据；Linux arm64、容器、WSL、NAS 与无 systemd 环境不在已验证矩阵。部署路径见
 [Linux VPS runbook](docs/operations/linux-vps.md)。
@@ -143,7 +144,7 @@ wakebridge release-preflight
 
 ```bash
 npm pack --json
-npm install --global ./wake-bridge-0.9.0-preview.9.tgz
+npm install --global ./wake-bridge-0.9.0-preview.11.tgz
 wakebridge release-preflight
 wakebridge init \
   --data-dir /absolute/private/path \
@@ -166,6 +167,18 @@ wake-bridge/transport
 
 Root import 只聚合公开 contract。Core、SQLite、daemon 与 owner control 不属于 package API。详见
 [public SDK boundary](docs/operations/public-sdk.md)。
+
+### Claude CLI 在线会话
+
+同一个 `wake-bridge` package 提供实验性的 `wakebridge-claude` 启动器，不需要安装第二个 npm 包：
+
+```bash
+wakebridge-claude launch --experimental \
+  --bridge-config /absolute/agent-space/wakebridge.config.json \
+  --attention-channel default -- --model sonnet
+```
+
+它只支持由该命令明确启动的 Claude Code TTY 在线会话；不支持 `-p`、无 TTY 的 `stream-json` 长进程、Desktop、冷启动或附着到已经运行的普通会话。完整边界与配置见 [Claude CLI Host Adapter](host-adapters/claude-cli/README.md)。
 
 ### 无 Host Adapter 时
 
@@ -208,6 +221,7 @@ Wake Bridge 仍会可靠保存 Event、Claim 与 Batch，但 delivery 明确停�
 - [Release lifecycle](docs/operations/release-lifecycle.md)
 - [公开验证口径](docs/verification.md)
 - [小机知道 Source Connector](docs/adapters/botlingknows.md)
+- [Claude CLI Host Adapter](host-adapters/claude-cli/README.md)
 
 ## 项目词汇
 

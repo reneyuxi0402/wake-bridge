@@ -96,6 +96,15 @@ describe("published tarball", () => {
         "docs/operations/templates/sources.json.example",
         "docs/releases/0.9.0-preview.9.md",
         "docs/releases/0.9.0-preview.10.md",
+        "docs/releases/0.9.0-preview.11.md",
+        "host-adapters/claude-cli/src/cli.mjs",
+        "host-adapters/claude-cli/src/launcher.mjs",
+        "host-adapters/claude-cli/src/channel.mjs",
+        "host-adapters/claude-cli/src/hook.mjs",
+        "host-adapters/claude-cli/src/owner-mcp.mjs",
+        "host-adapters/claude-cli/src/version.mjs",
+        "host-adapters/claude-cli/examples/host-adapters.json",
+        "host-adapters/claude-cli/README.md",
         "schemas/event-v1.schema.json",
         "schemas/policy-v1.schema.json",
       ]));
@@ -103,7 +112,10 @@ describe("published tarball", () => {
 
       run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--prefix", installRoot, tarball], root);
       const binary = join(installRoot, "node_modules", ".bin", "wakebridge");
+      const claudeBinary = join(installRoot, "node_modules", ".bin", "wakebridge-claude");
       expect(existsSync(binary)).toBe(true);
+      expect(existsSync(claudeBinary)).toBe(true);
+      expect(run(claudeBinary, ["--help"], installRoot)).toMatch(/--experimental/u);
       const installedPackage = JSON.parse(readFileSync(join(installRoot, "node_modules", "wake-bridge", "package.json"), "utf8")) as { version: string };
       expect(run(process.execPath, ["--input-type=module", "--eval",
         "import('wake-bridge').then(m => { if (m.WakeBridge || m.releasePreflight || m.EVENT_CONTRACT_VERSION !== 1 || m.SOURCE_ADAPTER_CONTRACT_VERSION !== 1 || m.HOST_ADAPTER_CONTRACT_VERSION !== 1 || m.connectorCatalog().length !== 3) process.exit(2); console.log(m.RELEASE_VERSION); })"], installRoot).trim())

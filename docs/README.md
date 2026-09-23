@@ -14,6 +14,7 @@
 
 - [Out-of-process Host Adapter](operations/out-of-process-host-adapter.md)
 - [Reference Host Adapter](../examples/reference-host-adapter/README.md)
+- [Claude CLI online-session Host Adapter](../host-adapters/claude-cli/README.md)
 - [Public SDK boundary](operations/public-sdk.md)
 
 ## Source Connector
@@ -34,3 +35,5 @@
 - [公开验证口径](verification.md)
 - [0.9.0-preview.8 release notes](releases/0.9.0-preview.8.md)
 - [0.9.0-preview.9 release notes](releases/0.9.0-preview.9.md)
+- [0.9.0-preview.10 release notes](releases/0.9.0-preview.10.md)
+- [0.9.0-preview.11 release notes](releases/0.9.0-preview.11.md)
