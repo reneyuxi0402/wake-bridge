@@ -23,7 +23,8 @@ Wake Bridge 是一个 local-first 的 **agent attention scheduler and delivery c
 
 从 [First Wake Quickstart](docs/quickstart.md) 开始。它覆盖 clean install、Agent Space 初始化、仓库外 Host Adapter、第一条受控 wake、MCP、presence、self-commitment 与可选 Source Connector。完整公共文档见 [文档导航](docs/README.md)。
 
-`0.9.0-preview.12` 是当前公开 pre-release，发布在 npm 的 `preview` channel。它内置可选的 Claude CLI 在线会话 Host Adapter；已在
+`0.9.0-preview.13` 是当前公开 pre-release，发布在 npm 的 `preview` channel。它内置可选的 Claude CLI 在线会话 Host Adapter
+与 Gmail Source Connector；已在
 Ubuntu 22.04 LTS x64 实机完成连续两轮 reboot canary，并在 Ubuntu 24.04 x64 CI 验证。Wake Bridge 本身不内置任何具体
 agent runtime；未列入官方 adapter 的宿主仍须已有或实现一个能精确控制目标 session 的 adapter。
 
@@ -119,7 +120,7 @@ Connector 采用“可发现、可选配置、默认关闭”的模型。默认�
 | Connector | 状态 | 默认行为 |
 | --- | --- | --- |
 | 小机知道 | official optional | disabled；verify + from-now bootstrap 后才能 enable |
-| Gmail | planned | 不可 enable；完成独立设计、provider 合规与真实 UAT 后再进入 available |
+| Gmail | official optional | disabled；verify + from-now bootstrap + UAT 后才能 enable |
 | Group Chat fixture | reference/conformance | disabled；用于证明通用 connector contract |
 
 Source Connector 的本地协议、身份 fencing、cursor CAS 与错误处理见
@@ -127,7 +128,7 @@ Source Connector 的本地协议、身份 fencing、cursor CAS 与错误处理�
 
 ## Preview 安装
 
-当前 package 名称为 `wake-bridge`，发布 channel 为 `preview`。`0.9.0-preview.12` 支持 macOS arm64/x64，以及带 systemd
+当前 package 名称为 `wake-bridge`，发布 channel 为 `preview`。`0.9.0-preview.13` 支持 macOS arm64/x64，以及带 systemd
 user service 的 Linux x64；需要 Node.js 20+ 与 SQLite CLI 3.33+。Linux 实机证据来自 Ubuntu 22.04 LTS x64，Ubuntu
 24.04 x64 当前只有 CI 证据；Linux arm64、容器、WSL、NAS 与无 systemd 环境不在已验证矩阵。部署路径见
 [Linux VPS runbook](docs/operations/linux-vps.md)。
@@ -145,7 +146,7 @@ wakebridge release-preflight
 
 ```bash
 npm pack --json
-npm install --global ./wake-bridge-0.9.0-preview.12.tgz
+npm install --global ./wake-bridge-0.9.0-preview.13.tgz
 wakebridge release-preflight
 wakebridge init \
   --data-dir /absolute/private/path \

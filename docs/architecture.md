@@ -91,9 +91,10 @@ ingress。source credential 只允许固定 source 写 event，不获得 inspect
 - credential-bound generic push ingress 与 `wake-bridge/event` client；
 - versioned `wake-bridge/source` pull contract、loopback connector、cursor CAS 与 supervisor；
 - `wake-bridge/source/group-chat` reference mapper/conformance fixture 与 loopback HTTP connector；
-- botlingknows read-only connector implementation，作为额外独立来源证据，不取代 Group Chat 的公开 canary 位置。
+- botlingknows read-only connector implementation，作为额外独立来源证据，不取代 Group Chat 的公开 canary 位置；
+- Gmail History API connector implementation，具备 provider pagination、cursor expiry fencing、最小 metadata event 与真实账号 canary UAT 证据。
 
-小机知道是首发 official optional connector；Gmail 保持 planned，完成独立 provider/compliance/UAT 提案前不可 enable。
+小机知道与 Gmail 是 official optional connector，均默认 disabled，完成各自 verify、from-now bootstrap 与 UAT 后才可显式 enable。
 Group Chat 只作为 reference/conformance source。更多 provider connector 不应在 SDK 边界之外提前扩张。
 
 Connector 不决定是否唤醒，也不把完整正文复制进 Bridge。标准事件保存 resource reference、必要 metadata 与可选的短 preview。Source Connector 取得的 ingest capability 只能使用自己的 namespace/dedupe domain，不能更新 policy、claim、presence、binding 或 endpoint。

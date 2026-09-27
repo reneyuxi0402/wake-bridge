@@ -24,7 +24,7 @@
 - [Source-scoped ingress](operations/source-ingress.md)
 - [小机知道 Connector](adapters/botlingknows.md)
 - [Group Chat reference connector](adapters/group-chat.md)
-- [Gmail planned status](adapters/gmail-planned.md)
+- [Gmail Source Connector](adapters/gmail.md)
 
 ## 运维与发布
 
@@ -38,3 +38,4 @@
 - [0.9.0-preview.10 release notes](releases/0.9.0-preview.10.md)
 - [0.9.0-preview.11 release notes](releases/0.9.0-preview.11.md)
 - [0.9.0-preview.12 release notes](releases/0.9.0-preview.12.md)
+- [0.9.0-preview.13 release notes](releases/0.9.0-preview.13.md)

@@ -14,12 +14,14 @@ describe("public Source Connector catalog", () => {
     expect(catalog.some((entry) => /yingfeng|迎风/u.test(`${entry.id} ${entry.display_name}`))).toBe(false);
   });
 
-  it("keeps Gmail non-enableable until its proposal and UAT are complete", () => {
+  it("advertises the bundled Gmail connector after its real UAT while keeping it disabled by default", () => {
     const gmail = connectorCatalog().find((entry) => entry.id === "gmail");
     expect(gmail).toMatchObject({
-      availability: "planned",
-      bundled: false,
-      enable_supported: false,
+      availability: "available",
+      bundled: true,
+      enable_supported: true,
+      default_state: "disabled",
+      onboarding: ["configure", "verify_identity", "bootstrap_from_now", "uat", "enable"],
     });
   });
 });

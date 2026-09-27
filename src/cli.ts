@@ -6,6 +6,7 @@ import { bridgeConfigFromFile, initializeInstance, instanceConfigSecurity, insta
 import { WakeBridgeMcpServer, runMcpStdio } from "./mcp.js";
 import { bootstrapSourceConnector, loadSourceConnectorFile, SourceSupervisor } from "./source-connector.js";
 import { startBotlingKnowsConnector } from "./connectors/botlingknows-mcp.js";
+import { startGmailConnector } from "./connectors/gmail-http.js";
 import { startGroupChatConnector } from "./connectors/group-chat-http.js";
 import { CONNECTOR_RUNTIME_STATES, connectorCatalog } from "./connector-catalog.js";
 import { DaemonSourceControlClient } from "./source-control-client.js";
@@ -27,7 +28,7 @@ type Args = Record<string, string | boolean>;
 
 const KNOWN_COMMANDS = new Set([
   "help", "--help", "init", "owner-token-rotate", "release-preflight", "backup", "upgrade", "restore",
-  "service", "doctor", "connector-catalog", "source-validate", "botlingknows-connector", "group-chat-connector",
+  "service", "doctor", "connector-catalog", "source-validate", "botlingknows-connector", "gmail-connector", "group-chat-connector",
   "daemon", "mcp", "source-bootstrap", "source-once", "policy", "emit", "claim-schedule", "claim-snooze",
   "claim-dismiss", "claim-consume", "endpoint-register", "endpoint-renew", "takeover", "presence-renew", "tick",
   "dispatch", "inspect", "status", "batch-retry", "events", "claims", "batches", "receipts", "bindings", "endpoints",
@@ -171,6 +172,7 @@ function help(): void {
       "source-once SOURCE --connectors PATH",
       "source-bootstrap SOURCE --mode from-now --connectors PATH --expected-subject-ref REF --expected-binding-fingerprint sha256:...",
       "botlingknows-connector --port 4391 (requires env-only upstream URL, subject ref, and connector token)",
+      "gmail-connector --port 4393 (requires env-only OAuth credential directory and connector token)",
       "group-chat-connector --port 4392 (requires env-only Group Chat URL, service token, and connector token)",
       "mcp (stdio JSON-RPC; use WAKEBRIDGE_DB/WAKEBRIDGE_INSTANCE_ID/WAKEBRIDGE_OWNER_ID)",
     ],
@@ -392,6 +394,32 @@ async function main(): Promise<void> {
       port: Number(option(parsed.options, "port", "4391")),
     });
     output({ ok: true, source: "botlingknows", address: connector.address });
+    const close = async () => connector.close();
+    process.once("SIGINT", () => { void close().finally(() => process.exit(0)); });
+    process.once("SIGTERM", () => { void close().finally(() => process.exit(0)); });
+    await new Promise<void>(() => undefined);
+    return;
+  }
+  if (parsed.command === "gmail-connector") {
+    if (
+      Object.prototype.hasOwnProperty.call(parsed.options, "credentials_dir")
+      || Object.prototype.hasOwnProperty.call(parsed.options, "connector_token")
+    ) {
+      throw new Error("connector credentials and tokens must be supplied through the environment");
+    }
+    const credentialsDir = process.env.GMAIL_CREDENTIALS_DIR;
+    const connectorToken = process.env.WAKEBRIDGE_CONNECTOR_TOKEN;
+    if (!credentialsDir || !connectorToken) {
+      throw new Error("GMAIL_CREDENTIALS_DIR and WAKEBRIDGE_CONNECTOR_TOKEN are required");
+    }
+    const connector = await startGmailConnector({
+      credentials_dir: credentialsDir,
+      connector_token: connectorToken,
+      attention_channel: process.env.GMAIL_ATTENTION_CHANNEL || "life",
+      host: option(parsed.options, "host", "127.0.0.1"),
+      port: Number(option(parsed.options, "port", "4393")),
+    });
+    output({ ok: true, source: "gmail", address: connector.address });
     const close = async () => connector.close();
     process.once("SIGINT", () => { void close().finally(() => process.exit(0)); });
     process.once("SIGTERM", () => { void close().finally(() => process.exit(0)); });

@@ -83,7 +83,7 @@ describe("Wake Bridge CLI", () => {
     expect(Object.keys(hosts).sort()).toEqual(["configured_adapters", "contract"]);
   });
 
-  it("lists a secret-free Source Connector catalog without enabling planned connectors", () => {
+  it("lists a secret-free Source Connector catalog without enabling connectors by default", () => {
     const result = spawnSync(process.execPath, ["dist/src/cli.js", "connector-catalog"], {
       cwd: process.cwd(), env: process.env, encoding: "utf8",
     });
@@ -94,7 +94,7 @@ describe("Wake Bridge CLI", () => {
       runtime_states: ["disabled", "enabled", "needs_attention"],
       connectors: [
         { id: "botlingknows", availability: "available", default_state: "disabled", enable_supported: true },
-        { id: "gmail", availability: "planned", default_state: "disabled", enable_supported: false },
+        { id: "gmail", availability: "available", default_state: "disabled", enable_supported: true },
         { id: "group_chat_fixture", kind: "reference", default_state: "disabled" },
       ],
     });

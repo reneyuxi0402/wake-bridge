@@ -10,6 +10,16 @@
       "max_backoff_ms": 900000,
       "limit": 50,
       "max_pages_per_cycle": 4
+    },
+    {
+      "id": "gmail",
+      "base_url": "http://127.0.0.1:4393",
+      "token_env": "WAKEBRIDGE_SOURCE_GMAIL_TOKEN",
+      "enabled": false,
+      "poll_interval_ms": 60000,
+      "max_backoff_ms": 900000,
+      "limit": 50,
+      "max_pages_per_cycle": 4
     }
   ]
 }

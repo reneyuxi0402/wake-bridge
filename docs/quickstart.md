@@ -137,7 +137,7 @@ configure → verify identity → bootstrap from-now → real UAT → enable
 4. 用一条无敏感通知完成真实 wake UAT
 5. `attention_source_enable("botlingknows")`
 
-不要跳过 from-now bootstrap，不要手改 SQLite，也不要把上游 MCP URL 或 credential 传给 Wake Bridge 工具。详见 [Connector catalog](operations/connector-catalog.md)、[Source Connector contract](operations/source-connectors.md) 与 [小机知道 Connector](adapters/botlingknows.md)。
+不要跳过 from-now bootstrap，不要手改 SQLite，也不要把上游 MCP URL 或 credential 传给 Wake Bridge 工具。详见 [Connector catalog](operations/connector-catalog.md)、[Source Connector contract](operations/source-connectors.md)、[小机知道 Connector](adapters/botlingknows.md) 与 [Gmail Connector](adapters/gmail.md)。
 
 ## 6. 停止与保留数据
 

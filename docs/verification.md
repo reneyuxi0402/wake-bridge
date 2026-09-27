@@ -1,6 +1,6 @@
 # 公开验证口径
 
-状态：`wake-bridge@0.9.0-preview.9` 已发布到 npm `preview` 与 GitHub pre-release。
+状态：`wake-bridge@0.9.0-preview.13` release candidate；发布后由 npm `preview` 与 GitHub pre-release 提供同一 tarball。
 
 公共仓库用以下证据验证自身，不用具体宿主产品的现场结果代替通用契约：
 
@@ -9,7 +9,7 @@
 - Core durability：Event、Claim、Batch、outbox、retry 与 receipt 在 SQLite 中具有可恢复状态；
 - policy：immediate、scheduled、suppress、quiet hours、presence、inactivity watch 与 self-commitment；
 - Host Adapter contract：open、renew、close、takeover generation fencing、route credential separation 与 receipt upper bound；
-- Source Connector contract：manifest identity、from-now bootstrap、cursor CAS、dedupe、retry 与 `needs_attention`；
+- Source Connector contract：manifest identity、from-now bootstrap、cursor CAS、dedupe、retry 与 `needs_attention`；bundled Gmail Connector 另有真实账号 History/metadata canary 与无读取副作用证据；
 - package black box：从 tarball 在仓库外安装后完成 import、init、daemon、emit、inspect、external Host Adapter、backup 与 service profile；
 - reference adapter：只依赖公开 `wake-bridge/transport` subpath，并通过独立 conformance tests。
 
