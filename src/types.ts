@@ -21,6 +21,11 @@ export type BatchState =
   | "cancelled"
   | "needs_attention"
   | "dead_letter";
+export const CLAIM_STATES: ClaimState[] = ["pending", "deferred", "eligible", "batched", "consumed", "dismissed", "expired"];
+export const BATCH_STATES: BatchState[] = ["pending", "waiting_for_endpoint", "waiting_for_waiter", "dispatching", "retry_wait", "dispatched", "seen", "cancelled", "needs_attention", "dead_letter"];
+/** Claims tick() still has gates to evaluate for; the rest are terminal or already batched. */
+export const ACTIVE_CLAIM_STATES: ClaimState[] = ["pending", "deferred", "eligible"];
+
 export type AttemptState = "leased" | "accepted" | "failed" | "expired";
 export type ReceiptStage = "transport_accepted" | "host_attested" | "agent_completed" | "agent_seen" | "agent_consumed" | "agent_acted";
 export type SourceReadSideEffects = "none" | "marks_read" | "consumes" | "unknown";

@@ -17,6 +17,7 @@ import {
 import { MockTransport } from "./transport.js";
 import { validateWakeEventInput } from "./event-sdk.js";
 import { WakeBridgeSdkError } from "./sdk-error.js";
+import { ACTIVE_CLAIM_STATES, BATCH_STATES, CLAIM_STATES } from "./types.js";
 import type {
   ActivityObservation,
   ActivityObservationResult,
@@ -644,7 +645,7 @@ export class WakeBridge {
     if (!row) return null;
     const event = this.getEvent(String(row.id));
     if (!event) throw new BridgeError("dedupe record points to missing event", "storage_corrupt", 500);
-    const claim = this.listClaims().find((item) => item.event_ids.includes(event.id));
+    const claim = this.findClaimByEventId(event.id);
     return { event, claim, duplicate: true, suppressed: event.state === "suppressed" };
   }
 
@@ -740,7 +741,7 @@ export class WakeBridge {
     const existing = this.db.query<DbRow>(`SELECT id FROM events WHERE instance_id=${sqlValue(this.config.instance_id)} AND source=${sqlValue(source)} AND dedupe_key=${sqlValue(dedupeKey)} LIMIT 1;`)[0];
     if (existing) {
       const event = this.getEvent(String(existing.id))!;
-      const claim = this.listClaims().find((item) => item.event_ids.includes(event.id));
+      const claim = this.findClaimByEventId(event.id);
       if (!claim) throw new BridgeError("self commitment event has no claim", "storage_corrupt", 500);
       return { event, claim, duplicate: true, warnings: this.scheduleWarnings(claim.attention_channel) };
     }
@@ -767,7 +768,7 @@ export class WakeBridge {
         const duplicateEvent = this.db.query<DbRow>(`SELECT id FROM events WHERE instance_id=${sqlValue(this.config.instance_id)} AND source=${sqlValue(source)} AND dedupe_key=${sqlValue(dedupeKey)} LIMIT 1;`)[0];
         if (duplicateEvent) {
           const event = this.getEvent(String(duplicateEvent.id))!;
-          const claim = this.listClaims().find((item) => item.event_ids.includes(event.id));
+          const claim = this.findClaimByEventId(event.id);
           if (claim) return { event, claim, duplicate: true, warnings: this.scheduleWarnings(claim.attention_channel) };
         }
       }
@@ -785,13 +786,21 @@ export class WakeBridge {
     return row ? this.eventFromRow(row) : null;
   }
 
-  listEvents(filters: { state?: EventState; source?: string; after?: string; limit?: number } = {}): WakeEvent[] {
+  /**
+   * Oldest-first by default, which pages through history from the beginning.  Pass
+   * `newest_first` to take the most recent `limit` rows instead — still returned in
+   * chronological order — so a capped read of a growing table shows current activity
+   * rather than the first page ever written.
+   */
+  listEvents(filters: { state?: EventState; source?: string; after?: string; limit?: number; newest_first?: boolean } = {}): WakeEvent[] {
     const clauses = [`e.instance_id=${sqlValue(this.config.instance_id)}`];
     if (filters.state) clauses.push(`s.state=${sqlValue(filters.state)}`);
     if (filters.source) clauses.push(`e.source=${sqlValue(filters.source)}`);
     if (filters.after) clauses.push(`e.received_at>${sqlValue(filters.after)}`);
-    const limit = Math.min(1000, Math.max(1, Math.floor(filters.limit ?? 100)));
-    return this.db.query<DbRow>(`SELECT e.*, s.state FROM events e JOIN event_status s ON s.event_id=e.id WHERE ${clauses.join(" AND ")} ORDER BY e.received_at ASC LIMIT ${limit};`).map((row) => this.eventFromRow(row));
+    const limit = Math.min(100_000, Math.max(1, Math.floor(filters.limit ?? 100)));
+    const order = filters.newest_first ? "DESC" : "ASC";
+    const events = this.db.query<DbRow>(`SELECT e.*, s.state FROM events e JOIN event_status s ON s.event_id=e.id WHERE ${clauses.join(" AND ")} ORDER BY e.received_at ${order} LIMIT ${limit};`).map((row) => this.eventFromRow(row));
+    return filters.newest_first ? events.reverse() : events;
   }
 
   private eventFromRow(row: DbRow): WakeEvent {
@@ -824,9 +833,10 @@ export class WakeBridge {
     return row ? this.claimFromRow(row) : null;
   }
 
-  listClaims(filters: { state?: ClaimState; channel?: string; source?: string; limit?: number } = {}): AttentionClaim[] {
+  listClaims(filters: { state?: ClaimState; states?: ClaimState[]; channel?: string; source?: string; limit?: number } = {}): AttentionClaim[] {
     const clauses = [`c.instance_id=${sqlValue(this.config.instance_id)}`];
     if (filters.state) clauses.push(`c.state=${sqlValue(filters.state)}`);
+    if (filters.states?.length) clauses.push(`c.state IN (${filters.states.map(sqlValue).join(",")})`);
     if (filters.channel) clauses.push(`c.attention_channel=${sqlValue(filters.channel)}`);
     const limit = Math.min(100_000, Math.max(1, Math.floor(filters.limit ?? 1000)));
     let claims = this.db.query<DbRow>(`SELECT c.* FROM claims c WHERE ${clauses.join(" AND ")} ORDER BY c.created_at ASC LIMIT ${limit};`).map((row) => this.claimFromRow(row));
@@ -834,6 +844,31 @@ export class WakeBridge {
       claims = claims.filter((claim) => claim.event_ids.some((eventId) => this.getEvent(eventId)?.source === filters.source));
     }
     return claims;
+  }
+
+  countClaimsByState(filters: { channel?: string } = {}): Record<ClaimState, number> {
+    const clauses = [`instance_id=${sqlValue(this.config.instance_id)}`];
+    if (filters.channel) clauses.push(`attention_channel=${sqlValue(filters.channel)}`);
+    const counts = Object.fromEntries(CLAIM_STATES.map((state) => [state, 0])) as Record<ClaimState, number>;
+    for (const row of this.db.query<DbRow>(`SELECT state, COUNT(*) AS total FROM claims WHERE ${clauses.join(" AND ")} GROUP BY state;`)) {
+      counts[String(row.state) as ClaimState] = Number(row.total);
+    }
+    return counts;
+  }
+
+  countBatchesByState(filters: { channel?: string } = {}): Record<BatchState, number> {
+    const clauses = [`instance_id=${sqlValue(this.config.instance_id)}`];
+    if (filters.channel) clauses.push(`attention_channel=${sqlValue(filters.channel)}`);
+    const counts = Object.fromEntries(BATCH_STATES.map((state) => [state, 0])) as Record<BatchState, number>;
+    for (const row of this.db.query<DbRow>(`SELECT state, COUNT(*) AS total FROM batches WHERE ${clauses.join(" AND ")} GROUP BY state;`)) {
+      counts[String(row.state) as BatchState] = Number(row.total);
+    }
+    return counts;
+  }
+
+  private findClaimByEventId(eventId: string): AttentionClaim | undefined {
+    const row = this.db.query<DbRow>(`SELECT c.* FROM claims c WHERE c.instance_id=${sqlValue(this.config.instance_id)} AND EXISTS (SELECT 1 FROM json_each(c.event_ids_json) WHERE json_each.value=${sqlValue(eventId)}) ORDER BY c.created_at ASC LIMIT 1;`)[0];
+    return row ? this.claimFromRow(row) : undefined;
   }
 
   private claimFromRow(row: DbRow): AttentionClaim {
@@ -1385,10 +1420,10 @@ export class WakeBridge {
     const nowDate = this.now();
     const now = nowDate.toISOString();
     const result: TickResult = { inactivity_claims_created: this.materializeDueActivityWatches(now), expired_claims: [], deferred_claims: [], eligible_claims: [], batches_created: [], batches_updated: [] };
-    const claims = this.listClaims();
+    const claims = this.listClaims({ states: ACTIVE_CLAIM_STATES, limit: 100_000 });
     const transitions: string[] = [];
     for (const claim of claims) {
-      if (["consumed", "dismissed", "expired", "batched"].includes(claim.state)) continue;
+      if (!ACTIVE_CLAIM_STATES.includes(claim.state)) continue;
       if (claim.expires_at && claim.expires_at <= now) {
         transitions.push(...this.claimStateSql(claim, "expired", now, "expiry"));
         for (const eventId of claim.event_ids) transitions.push(...this.eventStateSql(eventId, "expired", now, "claim_expired"));
@@ -1541,7 +1576,7 @@ export class WakeBridge {
     const clauses = [`instance_id=${sqlValue(this.config.instance_id)}`];
     if (filters.states?.length) clauses.push(`state IN (${filters.states.map(sqlValue).join(",")})`);
     if (filters.channel) clauses.push(`attention_channel=${sqlValue(filters.channel)}`);
-    const limit = Math.min(1000, Math.max(1, Math.floor(filters.limit ?? 1000)));
+    const limit = Math.min(100_000, Math.max(1, Math.floor(filters.limit ?? 1000)));
     return this.db.query<DbRow>(`SELECT * FROM batches WHERE ${clauses.join(" AND ")} ORDER BY created_at ASC LIMIT ${limit};`).map((row) => this.batchFromRow(row));
   }
 
@@ -1951,9 +1986,9 @@ export class WakeBridge {
   } {
     return {
       instance: { instance_id: this.config.instance_id, owner_id: this.config.owner_id, timezone: this.config.timezone },
-      events: this.listEvents({ limit: 1000 }),
-      claims: this.listClaims(),
-      batches: this.listBatches(),
+      events: this.listEvents({ limit: 1000, newest_first: true }),
+      claims: this.listClaims({ limit: 100_000 }),
+      batches: this.listBatches({ limit: 100_000 }),
       bindings: this.listBindings(),
       endpoints: this.listEndpoints(),
       presence: this.listPresence(),

@@ -10,6 +10,7 @@ import type {
   WakeEvent,
   WakeBatch,
 } from "./types.js";
+import { BATCH_STATES, CLAIM_STATES } from "./types.js";
 import type { AgentSourceControl } from "./source-control-client.js";
 import { RELEASE_VERSION } from "./version.js";
 
@@ -47,8 +48,6 @@ export interface McpServerOptions {
   source_control?: AgentSourceControl;
 }
 
-const CLAIM_STATES: ClaimState[] = ["pending", "deferred", "eligible", "batched", "consumed", "dismissed", "expired"];
-const BATCH_STATES: BatchState[] = ["pending", "waiting_for_endpoint", "waiting_for_waiter", "dispatching", "retry_wait", "dispatched", "seen", "cancelled", "needs_attention", "dead_letter"];
 const EVENT_STATES: EventState[] = ["received", "matched", "suppressed", "batched", "consumed", "expired"];
 const ABSOLUTE_RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
 
@@ -551,10 +550,8 @@ export class WakeBridgeMcpServer {
           if (!batch) throw new BridgeError("batch not found", "batch_not_found", 404);
           return { batch: compactBatch(batch) };
         }
-        const claims = this.bridge.listClaims(channel ? { channel } : {});
-        const batches = this.bridge.listBatches(channel ? { channel } : {});
-        const claimCounts = Object.fromEntries(CLAIM_STATES.map((state) => [state, claims.filter((claim) => claim.state === state).length]));
-        const batchCounts = Object.fromEntries(BATCH_STATES.map((state) => [state, batches.filter((batch) => batch.state === state).length]));
+        const claimCounts = this.bridge.countClaimsByState(channel ? { channel } : {});
+        const batchCounts = this.bridge.countBatchesByState(channel ? { channel } : {});
         return { now: this.bridge.nowIso(), claims: claimCounts, batches: batchCounts };
       }
       case "attention_list": {
@@ -577,7 +574,8 @@ export class WakeBridgeMcpServer {
         const source = asOptionalString(args, "source", 128);
         const after = args.after === undefined ? undefined : asAbsoluteTimestamp(args, "after");
         const limit = args.limit === undefined ? undefined : asInteger(args, "limit", 1, 1000);
-        return { events: this.bridge.listEvents({ state, source, after, limit }).map(compactEvent) };
+        // Without `after` this is "show me what is going on", so take the newest page.
+        return { events: this.bridge.listEvents({ state, source, after, limit, newest_first: after === undefined }).map(compactEvent) };
       }
       case "attention_binding_status": {
         assertAllowed(args, ["channel"]);
@@ -647,8 +645,8 @@ export class WakeBridgeMcpServer {
           }));
           return { delivery: deliverySummary(batch), claims: claims.map(compactClaim), events: events.map(compactEvent), attempts, receipts };
         }
-        const actionable = new Set<BatchState>(["waiting_for_endpoint", "waiting_for_waiter", "retry_wait", "dispatched", "needs_attention", "dead_letter"]);
-        const batches = this.bridge.listBatches({ channel, limit: 1000 }).filter((batch) => actionable.has(batch.state)).slice(-limit);
+        const actionable: BatchState[] = ["waiting_for_endpoint", "waiting_for_waiter", "retry_wait", "dispatched", "needs_attention", "dead_letter"];
+        const batches = this.bridge.listBatches({ channel, states: actionable, limit: 100_000 }).slice(-limit);
         return {
           now,
           deliveries: batches.map(deliverySummary),

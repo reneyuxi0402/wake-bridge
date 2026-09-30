@@ -1,5 +1,6 @@
 import { BridgeError, type WakeBridge } from "./core.js";
 import { sqlValue } from "./db.js";
+import { BATCH_STATES } from "./types.js";
 import type {
   BatchState,
   SourceSupervisorStatus,
@@ -7,18 +8,6 @@ import type {
 } from "./types.js";
 import type { HostAdapterManifest } from "./transport-sdk.js";
 
-const BATCH_STATES: BatchState[] = [
-  "pending",
-  "waiting_for_endpoint",
-  "waiting_for_waiter",
-  "dispatching",
-  "retry_wait",
-  "dispatched",
-  "seen",
-  "cancelled",
-  "needs_attention",
-  "dead_letter",
-];
 const RETRY_REASON = /^[^\u0000-\u001f\u007f]{1,200}$/u;
 const SAFE_ERROR_CLASS = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/u;
 
