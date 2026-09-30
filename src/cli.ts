@@ -642,17 +642,18 @@ async function main(): Promise<void> {
         output(retryDeadLetter(bridge, { batch_id: batchId, expected_attempt: expectedAttempt, reason }));
         break;
       }
+      // Capped lists show the newest rows (still in chronological order), not the first page ever written.
       case "events":
-        output(bridge.listEvents());
+        output(bridge.listEvents({ newest_first: true }));
         break;
       case "claims":
-        output(bridge.listClaims());
+        output(bridge.listClaims({ newest_first: true }));
         break;
       case "batches":
-        output(bridge.listBatches());
+        output(bridge.listBatches({ newest_first: true }));
         break;
       case "receipts":
-        output(bridge.listReceipts(parsed.rest[0]));
+        output(parsed.rest[0] ? bridge.listReceipts(parsed.rest[0]) : bridge.listReceipts(undefined, { limit: 1000, newest_first: true }));
         break;
       case "bindings":
         output(bridge.listBindings());

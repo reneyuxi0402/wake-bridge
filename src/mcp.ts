@@ -299,7 +299,7 @@ function toolDefinitions(): JsonObject[] {
     },
     {
       name: "attention_list",
-      description: "List compact attention claims by state, channel, or source.",
+      description: "List compact attention claims by state, channel, or source. Returns the most recent `limit` matching claims (default 1000), oldest first.",
       inputSchema: {
         type: "object",
         properties: {
@@ -313,7 +313,7 @@ function toolDefinitions(): JsonObject[] {
     },
     {
       name: "attention_event_list",
-      description: "List compact durable source events and their current match/consume state. Provider payloads and credentials are not returned.",
+      description: "List compact durable source events and their current match/consume state. Without `after`, returns the most recent `limit` events (default 100); with `after`, pages forward from that time. Results are oldest first. Provider payloads and credentials are not returned.",
       inputSchema: {
         type: "object",
         properties: {
@@ -564,7 +564,7 @@ export class WakeBridgeMcpServer {
         if (rawLimit !== undefined && (!Number.isInteger(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 1000)) {
           throw new BridgeError("limit must be an integer between 1 and 1000", "invalid_arguments", 400);
         }
-        const claims = this.bridge.listClaims({ state, channel, source, limit: rawLimit as number | undefined });
+        const claims = this.bridge.listClaims({ state, channel, source, limit: rawLimit as number | undefined, newest_first: true });
         return { claims: claims.map(compactClaim) };
       }
       case "attention_event_list": {

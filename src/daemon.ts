@@ -128,6 +128,20 @@ function hostSessionEndpoint(endpoint: ReturnType<WakeBridge["registerEndpoint"]
   };
 }
 
+/**
+ * `?limit=` for the owner list endpoints.  They return the newest `limit` rows in
+ * chronological order, so a capped read of a growing table shows current state.
+ */
+function listLimit(query: URLSearchParams, fallback: number): number {
+  const raw = query.get("limit");
+  if (raw == null || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 100_000) {
+    throw new BridgeError("limit must be an integer between 1 and 100000", "invalid_arguments", 400);
+  }
+  return value;
+}
+
 function pathParts(url: string): string[] {
   return url.split("?")[0].split("/").filter(Boolean).map((part) => decodeURIComponent(part));
 }
@@ -420,20 +434,22 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
         return;
       }
       const collection = parts[0] === "v1" ? parts[1] : parts[0];
+      const query = new URL(request.url || "/", "http://localhost").searchParams;
       if (method === "GET" && collection === "events") {
-        jsonResponse(response, 200, { events: bridge.listEvents({ limit: Number(new URL(request.url || "/", "http://localhost").searchParams.get("limit") || 100) }) });
+        jsonResponse(response, 200, { events: bridge.listEvents({ limit: listLimit(query, 100), newest_first: true }) });
         return;
       }
       if (method === "GET" && collection === "claims") {
-        jsonResponse(response, 200, { claims: bridge.listClaims({ state: new URL(request.url || "/", "http://localhost").searchParams.get("state") as any || undefined, channel: new URL(request.url || "/", "http://localhost").searchParams.get("channel") || undefined }) });
+        jsonResponse(response, 200, { claims: bridge.listClaims({ state: query.get("state") as any || undefined, channel: query.get("channel") || undefined, limit: listLimit(query, 1000), newest_first: true }) });
         return;
       }
       if (method === "GET" && collection === "batches") {
-        jsonResponse(response, 200, { batches: bridge.listBatches({ channel: new URL(request.url || "/", "http://localhost").searchParams.get("channel") || undefined }) });
+        jsonResponse(response, 200, { batches: bridge.listBatches({ channel: query.get("channel") || undefined, limit: listLimit(query, 1000), newest_first: true }) });
         return;
       }
       if (method === "GET" && collection === "receipts") {
-        jsonResponse(response, 200, { receipts: bridge.listReceipts(parts[2]) });
+        // One batch's receipts are naturally bounded; the instance-wide list is not.
+        jsonResponse(response, 200, { receipts: parts[2] ? bridge.listReceipts(parts[2]) : bridge.listReceipts(undefined, { limit: listLimit(query, 1000), newest_first: true }) });
         return;
       }
       if (method === "GET" && collection === "bindings") {

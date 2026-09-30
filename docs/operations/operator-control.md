@@ -42,6 +42,13 @@ credential 不能调用该 endpoint。
 address、lease token、session ref、provider error message、source credential 或 owner token。它只保留安全的 error class；详细 provider
 错误仍留在本地 DB/operator evidence 中，不进入结构化 health payload。
 
+## 列表读取
+
+`wakebridge events|claims|batches|receipts`、owner HTTP `GET /v1/events|claims|batches|receipts` 与 MCP
+`attention_list` / 不带 `after` 的 `attention_event_list` 都返回**最近**的 `limit` 条，结果仍按时间从旧到新排列。
+HTTP 可用 `?limit=` 指定 1–100000；events 默认 100，其余默认 1000。带 `after` 的 `attention_event_list` 从该时间向后翻页。
+需要完整数量时用 `attention_status` 或 `wakebridge status`，它们直接在 SQL 中计数，不受列表上限影响。
+
 ## Accepted but unacknowledged delivery
 
 自 preview.10 起提供；preview.8 / preview.9 没有此确认超时处理。

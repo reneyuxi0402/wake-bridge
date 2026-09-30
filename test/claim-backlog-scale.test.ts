@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { WakeBridge } from "../src/core.js";
 import { sqlJson, sqlValue } from "../src/db.js";
 import { WakeBridgeMcpServer } from "../src/mcp.js";
+import { startDaemon } from "../src/daemon.js";
 
 /**
  * Regression cover for a 2026-09-30 outage: `claims` grew past 1000 rows and the
@@ -18,14 +19,12 @@ function dbPath(): string {
   return join(mkdtempSync(join(tmpdir(), "wake-bridge-backlog-")), "bridge.sqlite");
 }
 
+function config(): any {
+  return { instance_id: "i", owner_id: "o", db_path: dbPath(), timezone: "UTC", endpoint_lease_ms: 60_000 };
+}
+
 function bridge(): WakeBridge {
-  return new WakeBridge({
-    instance_id: "i",
-    owner_id: "o",
-    db_path: dbPath(),
-    timezone: "UTC",
-    endpoint_lease_ms: 60_000,
-  } as any);
+  return new WakeBridge(config());
 }
 
 async function callTool(target: WakeBridge, name: string, args: Record<string, unknown> = {}): Promise<any> {
@@ -188,6 +187,28 @@ describe("claim backlog beyond one listing page", () => {
     expect(claims.map((claim) => claim.id)).toEqual(["ac_buried_998", "ac_buried_999", fresh.claim!.id]);
     expect(target.listBatches({ limit: 2, newest_first: true }).map((batch) => batch.id)).toEqual(["wb_settled_999", batchId]);
     expect(target.listClaims({ limit: 1 })[0]?.id).toBe("ac_buried_0");
+    target.close();
+  });
+  it("lists the newest claims over MCP and HTTP", async () => {
+    const settings = config();
+    const target = new WakeBridge(settings);
+    buryRetiredClaims(target, 1000);
+    const fresh = target.emit("manual", { type: "job.completed", dedupe_key: "fresh:surface", resource: { uri: "job://fresh/surface" } });
+
+    const listed = await callTool(target, "attention_list");
+    expect(listed.claims).toHaveLength(1000);
+    expect(listed.claims.at(-1).claim_id ?? listed.claims.at(-1).id).toBe(fresh.claim!.id);
+
+    const daemon = await startDaemon(settings, { bridge: target, host: "127.0.0.1", port: 0, scheduler_interval_ms: 0, unsafe_no_auth: true });
+    try {
+      const origin = `http://127.0.0.1:${(daemon.address as { port: number }).port}`;
+      const claims = await (await fetch(`${origin}/v1/claims?limit=2`)).json() as any;
+      expect(claims.claims.map((claim: any) => claim.id)).toEqual(["ac_buried_999", fresh.claim!.id]);
+      const invalid = await fetch(`${origin}/v1/claims?limit=abc`);
+      expect(invalid.status).toBe(400);
+    } finally {
+      await daemon.close();
+    }
     target.close();
   });
 });
