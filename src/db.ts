@@ -278,7 +278,12 @@ COMMIT;`);
     // therefore belong on every invocation, not only on initial migration.
     // `.timeout` is a sqlite3 CLI command and does not add a result row to
     // `-json` output (unlike PRAGMA busy_timeout=...).
-    return ".timeout 5000\nPRAGMA foreign_keys=ON;\n" + sql;
+    // `.bail on` is what makes transaction() atomic.  Without it the CLI
+    // reports a failing statement, keeps executing the rest of the script and
+    // reaches COMMIT, so a caller that sees the error would still have half of
+    // its writes committed.  With it the process stops at the first error and
+    // SQLite rolls back the open transaction when the connection closes.
+    return ".bail on\n.timeout 5000\nPRAGMA foreign_keys=ON;\n" + sql;
   }
 
   close(): void {
