@@ -329,6 +329,50 @@ describe("accepted wake acknowledgement timeout", () => {
     }
   });
 
+  it("closes an ack timeout once every claim it carried is finalized", async () => {
+    const clock = new TestClock();
+    const bridge = setupBridge(clock, { ack_timeout_ms: 10_000 });
+    try {
+      const batch = await dispatchAccepted(bridge);
+      const [claimId] = batch.claim_ids;
+      clock.advance(10_000);
+      await bridge.dispatchDue();
+      expect(bridge.getBatch(batch.id)).toMatchObject({ state: "needs_attention", last_error: "ack_timeout" });
+
+      // A claim that can still come back keeps the item open.
+      bridge.snoozeClaim(claimId, new Date(clock.value.getTime() + 60_000).toISOString());
+      await bridge.dispatchDue();
+      expect(bridge.getBatch(batch.id)?.state).toBe("needs_attention");
+
+      bridge.consumeClaim(claimId, { handled: true });
+      await bridge.dispatchDue();
+      expect(bridge.getBatch(batch.id)).toMatchObject({ state: "cancelled", last_error: "ack_timeout" });
+      const transitions = bridge.db.query(`SELECT from_state, to_state, reason FROM batch_transitions WHERE batch_id='${batch.id}' ORDER BY rowid DESC LIMIT 1;`);
+      expect(transitions).toEqual([{ from_state: "needs_attention", to_state: "cancelled", reason: "all_claims_finalized_reconciled" }]);
+      expect(operatorStatus(bridge)).toMatchObject({ attention_required: false, queue: { needs_attention: [] } });
+    } finally {
+      bridge.close();
+    }
+  });
+
+  it("still raises the incident when the claims were finalized before the timeout", async () => {
+    const clock = new TestClock();
+    const bridge = setupBridge(clock, { ack_timeout_ms: 10_000, incident_attention_channel: "incidents" });
+    try {
+      const batch = await dispatchAccepted(bridge);
+      bridge.consumeClaim(batch.claim_ids[0], null);
+      clock.advance(10_000);
+      await bridge.dispatchDue();
+      expect(bridge.getBatch(batch.id)?.state).toBe("needs_attention");
+      expect(bridge.listEvents({ source: "wakebridge.core" })).toMatchObject([{ metadata: { reason_code: "ack_timeout", batch_id: batch.id } }]);
+
+      await bridge.dispatchDue();
+      expect(bridge.getBatch(batch.id)?.state).toBe("cancelled");
+    } finally {
+      bridge.close();
+    }
+  });
+
   it("defaults to 30 minutes and rejects invalid timeout configuration", () => {
     const defaultBridge = new WakeBridge(config(dbPath()));
     expect(defaultBridge.config.ack_timeout_ms).toBe(30 * 60_000);

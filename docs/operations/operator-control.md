@@ -64,6 +64,9 @@ needs-attention 摘要；agent 可用 `attention_wake_health` 查看 accepted �
 - 不会自动重投：adapter 可能已经实际投递，重投可能重复打扰。
 - 不会自动标已读或已处理：Claim/Event 和 receipt 保持原样。
 - 若当前 binding 对应的原 accepted attempt 后来收到真实 ack，可转为 `seen` 并解除本项异常；旧 generation 仍被拒绝。
+- 若该 batch 携带的每条 Claim 后来都已 `consumed`、`dismissed` 或 `expired`，canonical dispatcher 会在下一轮把它转为
+  `cancelled`（转换原因 `all_claims_finalized_reconciled`，`last_error` 仍为 `ack_timeout`），不再占据 needs-attention。
+  它至少会以 `needs_attention` 停留一轮，已配置的 core incident 照常发出；只要还有一条 Claim 可能再次投递，本项异常就保持打开。
 - `batch-retry` 仍只接受 `dead_letter`，不能重开本项异常。先核对 host/agent 的真实结果，再决定是否需要另行安排唤醒；
   不要为清空异常而伪造 ack。
 - 升级后，已有的超时记录会在 dispatcher 恢复/扫描时按相同规则暴露出来。这不是新增投递，也不要求修改数据库 schema。

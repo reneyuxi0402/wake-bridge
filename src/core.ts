@@ -1332,7 +1332,23 @@ export class WakeBridge {
         AND b.binding_generation IS NOT NULL AND a.state='accepted' AND a.attempt_no=b.attempt
         AND a.binding_generation=b.binding_generation AND a.finished_at IS NOT NULL
         AND a.finished_at<=${sqlValue(ackTimeoutCutoff)};`);
+    // An ack_timeout item exists so that a missing acknowledgement is noticed.
+    // Once every claim the batch carried is consumed, dismissed or expired, the
+    // agent has dealt with it by some route and the item is no longer
+    // actionable; leaving it open only buries newer incidents.  This runs before
+    // the timeout transition below, so a batch always spends at least one sweep
+    // in needs_attention and still raises its incident.  A claim row that is
+    // missing entirely keeps the item open.
+    const settledAckTimeout = `instance_id=${sqlValue(this.config.instance_id)} AND state='needs_attention' AND last_error='ack_timeout'
+         AND json_array_length(claim_ids_json)>0
+         AND NOT EXISTS (
+           SELECT 1 FROM json_each(batches.claim_ids_json) j LEFT JOIN claims c ON c.id=j.value
+           WHERE c.id IS NULL OR c.state NOT IN (${FINALIZED_CLAIM_STATES.map(sqlValue).join(",")})
+         )`;
     this.db.transaction([
+      `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
+       SELECT id, 'needs_attention', 'cancelled', 'all_claims_finalized_reconciled', ${sqlValue(now)} FROM batches WHERE ${settledAckTimeout};`,
+      `UPDATE batches SET state='cancelled', updated_at=${sqlValue(now)} WHERE ${settledAckTimeout};`,
       `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
        SELECT id, 'needs_attention', 'cancelled', 'all_claims_finalized_reconciled', ${sqlValue(now)} FROM batches
        WHERE instance_id=${sqlValue(this.config.instance_id)} AND state='needs_attention' AND last_error='all_claims_finalized'
