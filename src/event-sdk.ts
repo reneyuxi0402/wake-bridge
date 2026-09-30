@@ -1,10 +1,10 @@
 import { WakeBridgeSdkError } from "./sdk-error.js";
+import { ABSOLUTE_RFC3339, MIN_SECRET_LENGTH, SOURCE_ID } from "./validation.js";
 import type { JsonValue, ResourceRef, WakeEventInput } from "./types.js";
 
 export const EVENT_CONTRACT_VERSION = 1 as const;
 export const SUPPORTED_EVENT_CONTRACT_VERSIONS = [EVENT_CONTRACT_VERSION] as const;
 
-const ABSOLUTE_RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
 const FORBIDDEN_INPUT_KEYS = new Set([
   "owner_id", "instance_id", "policy", "policy_id", "endpoint", "endpoint_id",
   "wake_prompt", "wakePrompt", "system_instruction", "systemInstruction", "instructions", "prompt",
@@ -110,7 +110,6 @@ export interface SourcePushReceipt {
   [key: string]: JsonValue | object | undefined;
 }
 
-const SOURCE_ID = /^[A-Za-z0-9_.:-]{1,128}$/u;
 
 function localOrigin(raw: string): URL {
   let url: URL;
@@ -135,8 +134,8 @@ export class SourcePushClient {
     if (!SOURCE_ID.test(options.source)) {
       throw new WakeBridgeSdkError("source push source is invalid", "invalid_source_push_config", 400);
     }
-    if (typeof options.token !== "string" || options.token.length < 32) {
-      throw new WakeBridgeSdkError("source push token must contain at least 32 characters", "invalid_source_push_config", 400);
+    if (typeof options.token !== "string" || options.token.length < MIN_SECRET_LENGTH) {
+      throw new WakeBridgeSdkError(`source push token must contain at least ${MIN_SECRET_LENGTH} characters`, "invalid_source_push_config", 400);
     }
     this.fetchImpl = options.fetch ?? fetch;
     this.timeoutMs = options.timeout_ms ?? 15_000;

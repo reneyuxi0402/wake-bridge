@@ -17,6 +17,7 @@ import {
 import { MockTransport } from "./transport.js";
 import { validateWakeEventInput } from "./event-sdk.js";
 import { WakeBridgeSdkError } from "./sdk-error.js";
+import { ABSOLUTE_RFC3339, LOCAL_TIME, SECRET_ADDRESS_KEY, SOURCE_ID } from "./validation.js";
 import { ACTIVE_CLAIM_STATES, BATCH_STATES, CLAIM_STATES, FINALIZED_CLAIM_STATES, OPEN_BATCH_STATES } from "./types.js";
 import type {
   ActivityObservation,
@@ -148,8 +149,10 @@ function validateResource(resource: ResourceRef): void {
   if (JSON.stringify(resource).length > 4096) throw new BridgeError("resource is too large", "oversized_event", 413);
 }
 
+const POLICY_ID = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/u;
+
 export function normalizePolicy(policy: PolicyRule): PolicyRule {
-  if (!policy || typeof policy.id !== "string" || !/^[A-Za-z][A-Za-z0-9._-]{0,127}$/u.test(policy.id)
+  if (!policy || typeof policy.id !== "string" || !POLICY_ID.test(policy.id)
     || !Number.isSafeInteger(policy.version) || policy.version < 1) {
     throw new BridgeError("policy id and positive integer version are required", "invalid_policy", 400);
   }
@@ -168,7 +171,7 @@ export function normalizePolicy(policy: PolicyRule): PolicyRule {
     throw new BridgeError(`unsupported policy field(s): ${[...unsupportedDelivery, ...unsupportedTarget].join(", ")}`, "unsupported_policy_field", 400);
   }
   if (delivery.mode === "scheduled" && (typeof delivery.scheduled_local_time !== "string"
-    || !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(delivery.scheduled_local_time))) {
+    || !LOCAL_TIME.test(delivery.scheduled_local_time))) {
     throw new BridgeError("scheduled policy requires scheduled_local_time in HH:MM form", "invalid_policy", 400);
   }
   if (delivery.mode !== "scheduled" && delivery.scheduled_local_time != null) {
@@ -211,30 +214,11 @@ export function normalizePolicy(policy: PolicyRule): PolicyRule {
   if (policy.id === DEFAULT_POLICY.id && (policy.enabled === false || stableJson(policy.match ?? {}) !== "{}")) {
     throw new BridgeError("default policy must be enabled and have an empty match", "invalid_policy", 400);
   }
-  return {
-    ...policy,
-    enabled: policy.enabled !== false,
-    order: policy.order ?? 0,
-    match: policy.match ?? {},
-    delivery: {
-      ...delivery,
-      quiet_hours_policy: delivery.quiet_hours_policy ?? "defer",
-      foreground_presence_policy: delivery.foreground_presence_policy ?? "defer",
-    },
-    batch: {
-      coalesce_by: policy.batch?.coalesce_by ?? "coalesce_key",
-      max_events: policy.batch?.max_events ?? 20,
-      window_ms: policy.batch?.window_ms ?? 0,
-    },
-    target: {
-      attention_channel: policy.target?.attention_channel ?? "${attention_channel_hint}",
-    },
-    reason_code: policy.reason_code ?? policy.id,
-  };
+  return withPolicyDefaults(policy);
 }
 
 function normalizeStoredPolicy(policy: InstalledPolicyRule): InstalledPolicyRule {
-  if (!policy || typeof policy.id !== "string" || !/^[A-Za-z][A-Za-z0-9._-]{0,127}$/u.test(policy.id)
+  if (!policy || typeof policy.id !== "string" || !POLICY_ID.test(policy.id)
     || !Number.isSafeInteger(policy.version) || policy.version < 1) {
     throw new BridgeError("stored policy id or version is invalid", "invalid_policy", 500);
   }
@@ -243,13 +227,22 @@ function normalizeStoredPolicy(policy: InstalledPolicyRule): InstalledPolicyRule
     throw new BridgeError(`stored policy has unsupported delivery mode: ${String(delivery?.mode)}`, "invalid_policy", 500);
   }
   if (delivery.mode === "scheduled" && (typeof delivery.scheduled_local_time !== "string"
-    || !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(delivery.scheduled_local_time))) {
+    || !LOCAL_TIME.test(delivery.scheduled_local_time))) {
     throw new BridgeError("stored scheduled policy has invalid local time", "invalid_policy", 500);
   }
   const values = [delivery.debounce_ms, delivery.cadence_ms, delivery.max_delay_ms, policy.batch?.max_events, policy.batch?.window_ms];
   if (values.some((value) => value !== undefined && value !== null && (!Number.isFinite(value) || value < 0))) {
     throw new BridgeError("stored policy has invalid durations or batch limits", "invalid_policy", 500);
   }
+  return withPolicyDefaults(policy);
+}
+
+/**
+ * Defaults shared by newly installed and stored policies.  Legacy target fields
+ * survive only on stored rows; normalizePolicy has already rejected them.
+ */
+function withPolicyDefaults<T extends InstalledPolicyRule>(policy: T): T {
+  const delivery = policy.delivery;
   return {
     ...policy,
     enabled: policy.enabled !== false,
@@ -284,31 +277,29 @@ function currentInstalledPolicy(policy: InstalledPolicyRule): policy is PolicyRu
   }
 }
 
-function activeInstalledPolicyVersions(policies: InstalledPolicyRule[]): InstalledPolicyRule[] {
-  const latest = new Map<string, InstalledPolicyRule>();
+/** Highest version of each policy id, in matching order (order desc, then id). */
+function latestPolicyVersions<T extends InstalledPolicyRule>(policies: T[], normalize: (policy: T) => T): T[] {
+  const latest = new Map<string, T>();
   for (const raw of policies) {
-    const policy = normalizeStoredPolicy(raw);
+    const policy = normalize(raw);
     const current = latest.get(policy.id);
     if (!current || policy.version > current.version) latest.set(policy.id, policy);
   }
   return [...latest.values()].sort((a, b) => (b.order ?? 0) - (a.order ?? 0) || a.id.localeCompare(b.id));
 }
 
+function activeInstalledPolicyVersions(policies: InstalledPolicyRule[]): InstalledPolicyRule[] {
+  return latestPolicyVersions(policies, normalizeStoredPolicy);
+}
+
 export function activePolicyVersions(policies: PolicyRule[]): PolicyRule[] {
-  const latest = new Map<string, PolicyRule>();
-  for (const raw of policies) {
-    const policy = normalizePolicy(raw);
-    const current = latest.get(policy.id);
-    if (!current || policy.version > current.version) latest.set(policy.id, policy);
-  }
-  return [...latest.values()].sort((a, b) => (b.order ?? 0) - (a.order ?? 0) || a.id.localeCompare(b.id));
+  return latestPolicyVersions(policies, normalizePolicy);
 }
 
 function jsonRecord<T>(value: unknown, fallback: T): T {
   return parseJson<T>(value, fallback);
 }
 
-const ABSOLUTE_RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
 
 function isoOrThrow(value: string, field: string): string {
   if (typeof value !== "string" || !ABSOLUTE_RFC3339.test(value)) {
@@ -353,8 +344,8 @@ export class WakeBridge {
       }
     }
     if (config.quiet_hours && (!Array.isArray(config.quiet_hours.windows)
-      || config.quiet_hours.windows.some((window) => !window || !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(window.start)
-        || !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(window.end)))) {
+      || config.quiet_hours.windows.some((window) => !window || !LOCAL_TIME.test(window.start)
+        || !LOCAL_TIME.test(window.end)))) {
       throw new BridgeError("quiet_hours.windows must contain HH:MM start/end values", "invalid_quiet_hours", 400);
     }
     if (config.quiet_hours?.windows.length) {
@@ -628,7 +619,7 @@ export class WakeBridge {
   }
 
   private validateEvent(source: string, raw: WakeEventInput): WakeEventInput {
-    if (!source || !/^[A-Za-z0-9_.:-]{1,128}$/.test(source)) throw new BridgeError("source identity is invalid", "invalid_source", 400);
+    if (!source || !SOURCE_ID.test(source)) throw new BridgeError("source identity is invalid", "invalid_source", 400);
     try {
       return validateWakeEventInput(raw, this.now());
     } catch (error) {
@@ -653,10 +644,7 @@ export class WakeBridge {
     return /UNIQUE constraint failed/i.test(error instanceof Error ? error.message : String(error));
   }
 
-  /** Accept both emitEvent(source, input) and emitEvent(input, source). */
-  emitEvent(sourceOrInput: string | WakeEventInput, inputOrSource?: WakeEventInput | string): EmitResult {
-    const source = typeof sourceOrInput === "string" ? sourceOrInput : typeof inputOrSource === "string" ? inputOrSource : "manual";
-    const input = (typeof sourceOrInput === "string" ? inputOrSource : sourceOrInput) as WakeEventInput;
+  emitEvent(source: string, input: WakeEventInput): EmitResult {
     const clean = this.validateEvent(source, input);
     const idempotencyRow = clean.idempotency_key
       ? this.db.query<DbRow>(`SELECT result_json FROM idempotency_keys WHERE scope=${sqlValue(`event:${source}`)} AND key=${sqlValue(clean.idempotency_key)} LIMIT 1;`)[0]
@@ -925,7 +913,7 @@ export class WakeBridge {
         ...route,
         address: Object.fromEntries(Object.entries(route.address).map(([key, value]) => [
           key,
-          /token|secret|authorization|bearer/i.test(key) ? "[redacted]" : value,
+          SECRET_ADDRESS_KEY.test(key) ? "[redacted]" : value,
         ])),
       })),
       registered_at: String(row.registered_at),

@@ -1,4 +1,5 @@
 import { BridgeError } from "./core.js";
+import { SOURCE_ID } from "./validation.js";
 
 export interface AgentSourceControl {
   status(): Promise<Record<string, unknown>>;
@@ -34,7 +35,7 @@ export class DaemonSourceControlClient implements AgentSourceControl {
   disable(source: string): Promise<Record<string, unknown>> { return this.request("POST", `/v1/sources/${this.source(source)}/disable`, {}); }
 
   private source(value: string): string {
-    if (!/^[A-Za-z0-9_.:-]{1,128}$/u.test(value)) throw new BridgeError("source is invalid", "invalid_arguments", 400);
+    if (!SOURCE_ID.test(value)) throw new BridgeError("source is invalid", "invalid_arguments", 400);
     return encodeURIComponent(value);
   }
 

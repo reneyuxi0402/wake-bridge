@@ -3,6 +3,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
+import { MIN_SECRET_LENGTH } from "../validation.js";
 import {
   GMAIL_MAX_PAGE_SIZE,
   GmailSourceAdapter,
@@ -260,8 +261,8 @@ export async function startGmailConnector(options: GmailConnectorOptions): Promi
   manifest: SourceAdapterManifest;
   close: () => Promise<void>;
 }> {
-  if (!options.connector_token || options.connector_token.length < 32) {
-    throw new BridgeError("connector token must be at least 32 characters", "invalid_connector_config", 400);
+  if (!options.connector_token || options.connector_token.length < MIN_SECRET_LENGTH) {
+    throw new BridgeError(`connector token must be at least ${MIN_SECRET_LENGTH} characters`, "invalid_connector_config", 400);
   }
   const host = options.host ?? "127.0.0.1";
   if (!["127.0.0.1", "::1"].includes(host)) {

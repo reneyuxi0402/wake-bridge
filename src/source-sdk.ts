@@ -1,10 +1,10 @@
 import { WakeBridgeSdkError } from "./sdk-error.js";
+import { SOURCE_ID } from "./validation.js";
 import type { SourceAdapterManifest } from "./types.js";
 
 export const SOURCE_ADAPTER_CONTRACT_VERSION = 1 as const;
 export const SUPPORTED_SOURCE_ADAPTER_CONTRACT_VERSIONS = [SOURCE_ADAPTER_CONTRACT_VERSION] as const;
 
-const SOURCE_ID = /^[A-Za-z0-9_.:-]{1,128}$/u;
 const VERSION = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/u;
 const SUBJECT_REF = /^[A-Za-z0-9][A-Za-z0-9._:@/+~-]{0,199}$/u;
 const BINDING_FINGERPRINT = /^sha256:[0-9a-f]{64}$/u;

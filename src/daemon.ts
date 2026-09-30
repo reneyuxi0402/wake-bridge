@@ -14,6 +14,7 @@ import { SourceSupervisor } from "./source-connector.js";
 import { validateSourceIngestCredential, type SourceIngestCredential } from "./source-ingress.js";
 import { validatePolicyFile } from "./policy-control.js";
 import { operatorStatus, retryDeadLetter } from "./operator-control.js";
+import { MIN_SECRET_LENGTH, SECRET_ADDRESS_KEY } from "./validation.js";
 
 export interface DaemonOptions {
   host?: string;
@@ -122,7 +123,7 @@ function hostSessionEndpoint(endpoint: ReturnType<WakeBridge["registerEndpoint"]
       ...route,
       address: Object.fromEntries(Object.entries(route.address).map(([key, value]) => [
         key,
-        /token|secret|authorization|bearer/i.test(key) ? "[redacted]" : value,
+        SECRET_ADDRESS_KEY.test(key) ? "[redacted]" : value,
       ])),
     })),
   };
@@ -155,8 +156,8 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
   if (!config.admin_token && !options.unsafe_no_auth) {
     throw new BridgeError("admin_token is required; use unsafe_no_auth only for an explicit loopback development daemon", "admin_token_required", 400);
   }
-  if (config.admin_token && config.admin_token.length < 32) {
-    throw new BridgeError("admin_token must contain at least 32 characters", "invalid_admin_token", 400);
+  if (config.admin_token && config.admin_token.length < MIN_SECRET_LENGTH) {
+    throw new BridgeError(`admin_token must contain at least ${MIN_SECRET_LENGTH} characters`, "invalid_admin_token", 400);
   }
   const adapterRegistry = new HostAdapterRegistry(options.host_adapters ?? []);
   const hostCredentials = options.host_credentials ?? [];
@@ -166,7 +167,7 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
   }
   const hostCredentialIds = new Set<string>();
   for (const credential of hostCredentials) {
-    if (!credential.id || credential.token.length < 32 || !credential.adapter_kind || !credential.host_kind
+    if (!credential.id || credential.token.length < MIN_SECRET_LENGTH || !credential.adapter_kind || !credential.host_kind
       || !Array.isArray(credential.attention_channels) || !credential.attention_channels.length) {
       throw new BridgeError("host bootstrap credential is invalid", "invalid_host_credential", 400);
     }

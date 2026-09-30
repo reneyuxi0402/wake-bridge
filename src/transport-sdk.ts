@@ -1,4 +1,5 @@
 import { WakeBridgeSdkError } from "./sdk-error.js";
+import { MIN_SECRET_LENGTH } from "./validation.js";
 import type {
   ActivityKind,
   ActivityObservationResult,
@@ -46,7 +47,6 @@ export interface HostAdapter extends WakeTransport {
 
 const IDENTIFIER = /^[a-z][a-z0-9._-]{0,63}$/u;
 const PRINTABLE_REF = /^[^\u0000-\u001f\u007f]{1,256}$/u;
-const TOKEN_MIN_LENGTH = 32;
 const MAX_RESPONSE_BYTES = 65_536;
 
 function nonEmptyStrings(values: unknown): values is string[] {
@@ -117,7 +117,7 @@ export function validateLocalHostDeliveryRequest(value: unknown): LocalHostDeliv
   const request = value as Partial<LocalHostDeliveryRequest>;
   if (request?.protocol_version !== LOCAL_HOST_PROTOCOL_VERSION
     || typeof request.attempt_id !== "string" || !request.attempt_id || request.attempt_id.length > 200
-    || typeof request.delivery_nonce !== "string" || request.delivery_nonce.length < TOKEN_MIN_LENGTH || request.delivery_nonce.length > 256
+    || typeof request.delivery_nonce !== "string" || request.delivery_nonce.length < MIN_SECRET_LENGTH || request.delivery_nonce.length > 256
     || !request.wake || request.wake.schema_version !== 1
     || typeof request.wake.wake_batch_id !== "string" || !request.wake.wake_batch_id
     || typeof request.wake.attention_channel !== "string" || !request.wake.attention_channel
@@ -185,7 +185,7 @@ export class HostSessionClient {
 
   constructor(options: HostSessionClientOptions) {
     this.origin = loopbackHttpOrigin(options.base_url, "Wake Bridge daemon");
-    if (typeof options.host_token !== "string" || options.host_token.length < TOKEN_MIN_LENGTH) {
+    if (typeof options.host_token !== "string" || options.host_token.length < MIN_SECRET_LENGTH) {
       throw new WakeBridgeSdkError("host bootstrap token must contain at least 32 characters", "invalid_host_credential", 400);
     }
     if (!IDENTIFIER.test(options.adapter_kind)) {
@@ -206,7 +206,7 @@ export class HostSessionClient {
       throw new WakeBridgeSdkError("host session_ref or attention_channel is invalid", "invalid_host_session", 400);
     }
     const routeOrigin = loopbackHttpOrigin(input.route_origin, "host delivery route").origin;
-    if (typeof input.route_token !== "string" || input.route_token.length < TOKEN_MIN_LENGTH) {
+    if (typeof input.route_token !== "string" || input.route_token.length < MIN_SECRET_LENGTH) {
       throw new WakeBridgeSdkError("host delivery route token must contain at least 32 characters", "invalid_host_session", 400);
     }
     if (input.route_token === this.hostToken) {

@@ -11,6 +11,7 @@ import {
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { WakeBridge, BridgeError } from "./core.js";
 import type { BridgeConfig } from "./types.js";
+import { MIN_SECRET_LENGTH, SOURCE_ID as INSTANCE_ID } from "./validation.js";
 
 export interface WakeBridgeInstanceConfigFile {
   version: 1;
@@ -32,7 +33,6 @@ export interface InitializeInstanceOptions {
   config_path?: string;
 }
 
-const INSTANCE_ID = /^[A-Za-z0-9_.:-]{1,128}$/u;
 
 function assertPrivateMode(path: string, kind: string): void {
   if (process.platform === "win32") return;
@@ -62,7 +62,7 @@ export function loadInstanceConfig(path: string): WakeBridgeInstanceConfigFile {
   if (config?.version !== 1 || !INSTANCE_ID.test(config.instance_id ?? "") || !INSTANCE_ID.test(config.owner_id ?? "")
     || typeof config.db_path !== "string" || !isAbsolute(config.db_path)
     || typeof config.timezone !== "string" || !config.timezone
-    || typeof config.admin_token !== "string" || config.admin_token.length < 32) {
+    || typeof config.admin_token !== "string" || config.admin_token.length < MIN_SECRET_LENGTH) {
     throw new BridgeError("instance config is invalid", "invalid_instance_config", 400);
   }
   try {

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { BridgeError, normalizePolicy } from "./core.js";
 import { stableJson } from "./util.js";
+import { LOCAL_TIME } from "./validation.js";
 import type { PolicyFile, PolicyRule } from "./types.js";
 
 const POLICY_KEYS = new Set(["id", "version", "enabled", "order", "match", "delivery", "batch", "target", "reason_code", "expires_after_ms"]);
@@ -9,7 +10,6 @@ const BATCH_KEYS = new Set(["coalesce_by", "max_events", "window_ms"]);
 const TARGET_KEYS = new Set(["attention_channel"]);
 const PUBLIC_MODES = new Set(["immediate", "scheduled", "suppress"]);
 const POLICY_ID = /^[a-z][a-z0-9._-]{0,127}$/u;
-const LOCAL_TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/u;
 
 function object(value: unknown, field: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {

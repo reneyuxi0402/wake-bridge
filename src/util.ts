@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { JsonValue, QuietHoursConfig } from "./types.js";
+import type { QuietHoursConfig } from "./types.js";
 
 export const DEFAULT_TIMEZONE = "UTC";
 
@@ -127,10 +127,6 @@ export function nextLocalClock(date: Date, clock: string, timezone: string): Dat
     }
   }
   return new Date(start + 24 * 60 * 60_000);
-}
-
-export function jsonValue(value: unknown): JsonValue {
-  return value as JsonValue;
 }
 
 export function assertFiniteMs(value: number | null | undefined, field: string, fallback: number): number {

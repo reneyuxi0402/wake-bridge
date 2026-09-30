@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { BridgeError } from "./core.js";
 import type { HostBootstrapCredential } from "./host-adapter-registry.js";
+import { MIN_SECRET_LENGTH } from "./validation.js";
 import {
   HOST_ADAPTER_CONTRACT_VERSION,
   LOCAL_HOST_PROTOCOL_VERSION,
@@ -113,7 +114,7 @@ export class LocalHttpHostAdapter implements HostAdapter {
       throw new Error("local host route accepts only base_url and token");
     }
     loopbackHttpOrigin(stringAddress(route, "base_url"), "local host delivery route");
-    if (stringAddress(route, "token").length < 32) throw new Error("local host route token must contain at least 32 characters");
+    if (stringAddress(route, "token").length < MIN_SECRET_LENGTH) throw new Error(`local host route token must contain at least ${MIN_SECRET_LENGTH} characters`);
   }
 
   async dispatch(context: TransportContext): Promise<TransportResult> {
@@ -215,7 +216,7 @@ export function loadOutOfProcessHostFile(
     ids.add(reference.id);
     kinds.add(reference.adapter_kind);
     const token = environment[reference.token_env];
-    if (!token || token.length < 32) {
+    if (!token || token.length < MIN_SECRET_LENGTH) {
       throw new BridgeError(`host credential environment variable is missing or too short: ${reference.token_env}`, "host_credential_unavailable", 400);
     }
     const attentionChannels = boundedPrintable(reference.attention_channels, "attention_channels", true);

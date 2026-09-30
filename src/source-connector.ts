@@ -3,6 +3,7 @@ import { BridgeError, WakeBridge } from "./core.js";
 import { SourceCheckpointStore, SourceControlStore, SourceRunner } from "./source-adapter.js";
 import { validateSourceManifest } from "./source-sdk.js";
 import { WakeBridgeSdkError } from "./sdk-error.js";
+import { SOURCE_ID } from "./validation.js";
 import type {
   PullSourceAdapter,
   SourceAdapterManifest,
@@ -14,7 +15,6 @@ import type {
   SourceVerification,
 } from "./types.js";
 
-const SOURCE_ID = /^[A-Za-z0-9_.:-]{1,128}$/u;
 const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/u;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "[::1]", "::1"]);
 

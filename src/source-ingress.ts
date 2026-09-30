@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { BridgeError } from "./core.js";
+import { MIN_SECRET_LENGTH, SOURCE_ID } from "./validation.js";
 
 export interface SourceIngestCredential {
   id: string;
@@ -19,7 +20,6 @@ export interface SourceIngestCredentialFile {
 }
 
 const CREDENTIAL_ID = /^[a-z][a-z0-9._-]{0,63}$/u;
-const SOURCE_ID = /^[A-Za-z0-9_.:-]{1,128}$/u;
 const TOKEN_ENV = /^[A-Z_][A-Z0-9_]{0,127}$/u;
 
 export function validateSourceIngestCredential(credential: SourceIngestCredential): SourceIngestCredential {
@@ -29,8 +29,8 @@ export function validateSourceIngestCredential(credential: SourceIngestCredentia
   if (!SOURCE_ID.test(credential.source)) {
     throw new BridgeError("source ingest credential source is invalid", "invalid_source_credential", 400);
   }
-  if (typeof credential.token !== "string" || credential.token.length < 32) {
-    throw new BridgeError("source ingest credential token must contain at least 32 characters", "invalid_source_credential", 400);
+  if (typeof credential.token !== "string" || credential.token.length < MIN_SECRET_LENGTH) {
+    throw new BridgeError(`source ingest credential token must contain at least ${MIN_SECRET_LENGTH} characters`, "invalid_source_credential", 400);
   }
   return credential;
 }

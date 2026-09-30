@@ -2,7 +2,6 @@ import { createInterface } from "node:readline";
 import { BridgeError, WakeBridge } from "./core.js";
 import type {
   AttentionClaim,
-  BridgeConfig,
   BatchState,
   ClaimState,
   EventState,
@@ -13,6 +12,7 @@ import type {
 import { BATCH_STATES, CLAIM_STATES } from "./types.js";
 import type { AgentSourceControl } from "./source-control-client.js";
 import { RELEASE_VERSION } from "./version.js";
+import { ABSOLUTE_RFC3339 } from "./validation.js";
 
 /** MCP protocol version understood by this local stdio server. */
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
@@ -49,7 +49,6 @@ export interface McpServerOptions {
 }
 
 const EVENT_STATES: EventState[] = ["received", "matched", "suppressed", "batched", "consumed", "expired"];
-const ABSOLUTE_RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
 
 function isPlainObject(value: unknown): value is JsonObject {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -722,10 +721,6 @@ export class WakeBridgeMcpServer {
   }
 }
 
-export function createMcpServer(options: McpServerOptions | WakeBridge): WakeBridgeMcpServer {
-  return new WakeBridgeMcpServer(options);
-}
-
 /** Run newline-delimited JSON-RPC over stdin/stdout, with no stdout logging. */
 export async function runMcpStdio(server: WakeBridgeMcpServer, input: StdioInput = process.stdin, output: StdioOutput = process.stdout): Promise<void> {
   const lines = createInterface({ input, crlfDelay: Infinity });
@@ -740,16 +735,6 @@ export async function runMcpStdio(server: WakeBridgeMcpServer, input: StdioInput
     }
     const response = await server.handleRequest(request);
     if (response) output.write(`${JSON.stringify(response)}\n`);
-  }
-}
-
-/** Construct a bridge and serve it until stdin closes. Used by the CLI. */
-export async function runMcp(config: BridgeConfig): Promise<void> {
-  const bridge = new WakeBridge(config);
-  try {
-    await runMcpStdio(new WakeBridgeMcpServer(bridge));
-  } finally {
-    bridge.close();
   }
 }
 
