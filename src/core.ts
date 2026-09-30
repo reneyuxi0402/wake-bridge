@@ -17,7 +17,7 @@ import {
 import { MockTransport } from "./transport.js";
 import { validateWakeEventInput } from "./event-sdk.js";
 import { WakeBridgeSdkError } from "./sdk-error.js";
-import { ACTIVE_CLAIM_STATES, BATCH_STATES, CLAIM_STATES } from "./types.js";
+import { ACTIVE_CLAIM_STATES, BATCH_STATES, CLAIM_STATES, FINALIZED_CLAIM_STATES, OPEN_BATCH_STATES } from "./types.js";
 import type {
   ActivityObservation,
   ActivityObservationResult,
@@ -675,8 +675,8 @@ export class WakeBridge {
     let mergedClaim: AttentionClaim | null = null;
     if (claimId && channel) {
       const mergeSemantics = stableJson({ delivery: policy.delivery, batch: policy.batch, expires_after_ms: policy.expires_after_ms ?? null });
-      mergedClaim = this.listClaims({ channel, limit: 100_000 }).find((candidate) => {
-        if (!["pending", "deferred", "eligible"].includes(candidate.state) || stableJson(candidate.resource) !== stableJson(clean.resource)) return false;
+      mergedClaim = this.listClaims({ channel, states: ACTIVE_CLAIM_STATES, limit: 100_000 }).find((candidate) => {
+        if (stableJson(candidate.resource) !== stableJson(clean.resource)) return false;
         const firstEvent = this.getEvent(candidate.event_ids[0]);
         const existingPolicy = this.policy(candidate.policy_id, candidate.policy_version);
         return firstEvent?.source === source && existingPolicy != null
@@ -833,17 +833,19 @@ export class WakeBridge {
     return row ? this.claimFromRow(row) : null;
   }
 
-  listClaims(filters: { state?: ClaimState; states?: ClaimState[]; channel?: string; source?: string; limit?: number } = {}): AttentionClaim[] {
+  /** Same paging contract as listEvents: oldest-first unless `newest_first`. */
+  listClaims(filters: { state?: ClaimState; states?: ClaimState[]; channel?: string; source?: string; limit?: number; newest_first?: boolean } = {}): AttentionClaim[] {
     const clauses = [`c.instance_id=${sqlValue(this.config.instance_id)}`];
     if (filters.state) clauses.push(`c.state=${sqlValue(filters.state)}`);
     if (filters.states?.length) clauses.push(`c.state IN (${filters.states.map(sqlValue).join(",")})`);
     if (filters.channel) clauses.push(`c.attention_channel=${sqlValue(filters.channel)}`);
+    // Filter by source in SQL: filtering after LIMIT would return a short or
+    // empty page whenever the matching claims sit beyond the first page.
+    if (filters.source) clauses.push(`EXISTS (SELECT 1 FROM json_each(c.event_ids_json) j JOIN events e ON e.id=j.value WHERE e.source=${sqlValue(filters.source)})`);
     const limit = Math.min(100_000, Math.max(1, Math.floor(filters.limit ?? 1000)));
-    let claims = this.db.query<DbRow>(`SELECT c.* FROM claims c WHERE ${clauses.join(" AND ")} ORDER BY c.created_at ASC LIMIT ${limit};`).map((row) => this.claimFromRow(row));
-    if (filters.source) {
-      claims = claims.filter((claim) => claim.event_ids.some((eventId) => this.getEvent(eventId)?.source === filters.source));
-    }
-    return claims;
+    const order = filters.newest_first ? "DESC" : "ASC";
+    const claims = this.db.query<DbRow>(`SELECT c.* FROM claims c WHERE ${clauses.join(" AND ")} ORDER BY c.created_at ${order} LIMIT ${limit};`).map((row) => this.claimFromRow(row));
+    return filters.newest_first ? claims.reverse() : claims;
   }
 
   countClaimsByState(filters: { channel?: string } = {}): Record<ClaimState, number> {
@@ -1461,7 +1463,7 @@ export class WakeBridge {
         if (event) events.set(event.id, event);
       }
     }
-    const open = this.listBatches({ states: ["pending", "waiting_for_endpoint", "retry_wait"] });
+    const open = this.listBatches({ states: OPEN_BATCH_STATES, limit: 100_000 });
     const openByKey = new Map<string, WakeBatch>();
     for (const batch of open) {
       if (!batch.deadline || batch.deadline > now) openByKey.set(this.batchKey(batch.policy_id, batch.policy_version, batch.attention_channel, batch.coalesce_key ?? null), batch);
@@ -1572,12 +1574,25 @@ export class WakeBridge {
     return row ? this.batchFromRow(row) : null;
   }
 
-  listBatches(filters: { states?: BatchState[]; channel?: string; limit?: number } = {}): WakeBatch[] {
+  /** Same paging contract as listEvents: oldest-first unless `newest_first`. */
+  listBatches(filters: { states?: BatchState[]; channel?: string; limit?: number; newest_first?: boolean } = {}): WakeBatch[] {
     const clauses = [`instance_id=${sqlValue(this.config.instance_id)}`];
     if (filters.states?.length) clauses.push(`state IN (${filters.states.map(sqlValue).join(",")})`);
     if (filters.channel) clauses.push(`attention_channel=${sqlValue(filters.channel)}`);
     const limit = Math.min(100_000, Math.max(1, Math.floor(filters.limit ?? 1000)));
-    return this.db.query<DbRow>(`SELECT * FROM batches WHERE ${clauses.join(" AND ")} ORDER BY created_at ASC LIMIT ${limit};`).map((row) => this.batchFromRow(row));
+    const order = filters.newest_first ? "DESC" : "ASC";
+    const batches = this.db.query<DbRow>(`SELECT * FROM batches WHERE ${clauses.join(" AND ")} ORDER BY created_at ${order} LIMIT ${limit};`).map((row) => this.batchFromRow(row));
+    return filters.newest_first ? batches.reverse() : batches;
+  }
+
+  /** Every batch that references the claim, oldest first.  A snoozed claim can appear in several. */
+  private batchesContainingClaim(claimId: string, states?: BatchState[]): WakeBatch[] {
+    const clauses = [
+      `instance_id=${sqlValue(this.config.instance_id)}`,
+      `EXISTS (SELECT 1 FROM json_each(batches.claim_ids_json) WHERE json_each.value=${sqlValue(claimId)})`,
+    ];
+    if (states?.length) clauses.push(`state IN (${states.map(sqlValue).join(",")})`);
+    return this.db.query<DbRow>(`SELECT * FROM batches WHERE ${clauses.join(" AND ")} ORDER BY created_at ASC;`).map((row) => this.batchFromRow(row));
   }
 
   private batchFromRow(row: DbRow): WakeBatch {
@@ -1740,7 +1755,7 @@ export class WakeBridge {
     // reclaim on every sweep; the attempt id CAS below still protects a live
     // worker from a second dispatcher.
     this.recover();
-    const batches = this.listBatches({ states: ["pending", "waiting_for_endpoint", "retry_wait"] });
+    const batches = this.listBatches({ states: OPEN_BATCH_STATES, limit: 100_000 });
     const results: DispatchResult[] = [];
     for (const listed of batches) {
       if (listed.not_before > now) continue;
@@ -1823,8 +1838,7 @@ export class WakeBridge {
 
   private detachClaimFromOpenBatches(claim: AttentionClaim, now: string): string[] {
     const statements: string[] = [];
-    for (const batch of this.listBatches({ limit: 1000 })) {
-      if (!batch.claim_ids.includes(claim.id) || !["pending", "waiting_for_endpoint", "retry_wait"].includes(batch.state)) continue;
+    for (const batch of this.batchesContainingClaim(claim.id, OPEN_BATCH_STATES)) {
       const claimIds = batch.claim_ids.filter((idValue) => idValue !== claim.id);
       const eventIds = arrayWithoutDuplicates(batch.event_ids.filter((eventId) => !claim.event_ids.includes(eventId) || claimIds.some((otherClaimId) => this.getClaim(otherClaimId)?.event_ids.includes(eventId))));
       if (claimIds.length) {
@@ -1839,10 +1853,15 @@ export class WakeBridge {
     return statements;
   }
 
-  listReceipts(batchId?: string): Receipt[] {
+  /** Unbounded unless `limit` is given; `newest_first` then keeps the most recent rows, still in order. */
+  listReceipts(batchId?: string, options: { limit?: number; newest_first?: boolean } = {}): Receipt[] {
     const where = [`b.instance_id=${sqlValue(this.config.instance_id)}`];
     if (batchId) where.push(`r.batch_id=${sqlValue(batchId)}`);
-    return this.db.query<DbRow>(`SELECT r.* FROM receipts r JOIN batches b ON b.id=r.batch_id WHERE ${where.join(" AND ")} ORDER BY r.at ASC, r.id ASC;`).map((row) => ({
+    const order = options.newest_first ? "DESC" : "ASC";
+    const limit = options.limit == null ? "" : ` LIMIT ${Math.min(100_000, Math.max(1, Math.floor(options.limit)))}`;
+    const rows = this.db.query<DbRow>(`SELECT r.* FROM receipts r JOIN batches b ON b.id=r.batch_id WHERE ${where.join(" AND ")} ORDER BY r.at ${order}, r.id ${order}${limit};`);
+    if (options.newest_first) rows.reverse();
+    return rows.map((row) => ({
       id: String(row.id),
       batch_id: String(row.batch_id),
       claim_id: row.claim_id == null ? null : String(row.claim_id),
@@ -1856,9 +1875,9 @@ export class WakeBridge {
   }
 
   listAttempts(batchId?: string): DbRow[] {
-    const where = ["1=1"];
-    if (batchId) where.push(`batch_id=${sqlValue(batchId)}`);
-    return this.db.query<DbRow>(`SELECT * FROM outbox_attempts WHERE ${where.join(" AND ")} ORDER BY started_at ASC, attempt_no ASC;`);
+    const where = [`b.instance_id=${sqlValue(this.config.instance_id)}`];
+    if (batchId) where.push(`a.batch_id=${sqlValue(batchId)}`);
+    return this.db.query<DbRow>(`SELECT a.* FROM outbox_attempts a JOIN batches b ON b.id=a.batch_id WHERE ${where.join(" AND ")} ORDER BY a.started_at ASC, a.attempt_no ASC;`);
   }
 
   private acceptedAttempt(batchId: string, attemptNo?: number): DbRow | null {
@@ -1936,10 +1955,12 @@ export class WakeBridge {
   private claimAction(claimId: string, action: "snooze" | "dismiss" | "consume", value?: string | JsonValue | null): AttentionClaim {
     const claim = this.getClaim(claimId);
     if (!claim) throw new BridgeError("claim not found", "claim_not_found", 404);
-    if (["consumed", "dismissed", "expired"].includes(claim.state)) return claim;
+    if (FINALIZED_CLAIM_STATES.includes(claim.state)) return claim;
     const now = this.nowIso();
     const nextState: ClaimState = action === "snooze" ? "pending" : action === "dismiss" ? "dismissed" : "consumed";
-    const batch = this.listBatches({ limit: 1000 }).find((item) => item.claim_ids.includes(claimId));
+    // The consume receipt belongs to the delivery the agent is answering,
+    // which is the most recent batch when a snoozed claim was re-batched.
+    const batch = this.batchesContainingClaim(claimId).at(-1);
     const statements = [
       `UPDATE claims SET state=${sqlValue(nextState)}, eligible_after=${sqlValue(action === "snooze" ? String(value) : claim.eligible_after)}, snooze_until=${sqlValue(action === "snooze" ? String(value) : null)}, consumed_result_json=${sqlJson(action === "consume" ? value : null)}, dismissed_reason=${sqlValue(action === "dismiss" ? String(value || "dismissed") : null)}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(claimId)} AND state=${sqlValue(claim.state)};`,
       `INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT ${sqlValue(claimId)}, ${sqlValue(claim.state)}, ${sqlValue(nextState)}, ${sqlValue(action)}, ${sqlValue(now)} WHERE changes()>0;`,

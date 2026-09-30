@@ -52,6 +52,19 @@ function buryRetiredClaims(target: WakeBridge, count: number): void {
   target.db.transaction(statements);
 }
 
+/** Same idea for batches: `count` delivered batches dated well before now. */
+function burySettledBatches(target: WakeBridge, count: number): void {
+  const statements: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const stamp = new Date(Date.UTC(2020, 0, 1) + index * 1000).toISOString();
+    statements.push(
+      `INSERT INTO batches(id, instance_id, policy_id, policy_version, attention_channel, coalesce_key, claim_ids_json, event_ids_json, state, deadline, not_before, attempt, created_at, updated_at)
+       VALUES(${sqlValue(`wb_settled_${index}`)}, ${sqlValue("i")}, ${sqlValue("default")}, 1, ${sqlValue("default")}, NULL, ${sqlJson([])}, ${sqlJson([])}, ${sqlValue("seen")}, NULL, ${sqlValue(stamp)}, 0, ${sqlValue(stamp)}, ${sqlValue(stamp)});`,
+    );
+  }
+  target.db.transaction(statements);
+}
+
 describe("claim backlog beyond one listing page", () => {
   it("still promotes and dispatches a claim created after 1000 retired ones", async () => {
     const target = bridge();
@@ -116,23 +129,65 @@ describe("claim backlog beyond one listing page", () => {
 
   it("still surfaces a fresh needs_attention batch behind 1000 settled ones", async () => {
     const target = bridge();
-    const statements: string[] = [];
-    for (let index = 0; index < 1000; index += 1) {
-      const stamp = new Date(Date.UTC(2020, 0, 1) + index * 1000).toISOString();
-      statements.push(
-        `INSERT INTO batches(id, instance_id, policy_id, policy_version, attention_channel, coalesce_key, claim_ids_json, event_ids_json, state, deadline, not_before, attempt, created_at, updated_at)
-         VALUES(${sqlValue(`wb_settled_${index}`)}, ${sqlValue("i")}, ${sqlValue("default")}, 1, ${sqlValue("default")}, NULL, ${sqlJson([])}, ${sqlJson([])}, ${sqlValue("seen")}, NULL, ${sqlValue(stamp)}, 0, ${sqlValue(stamp)}, ${sqlValue(stamp)});`,
-      );
-    }
-    statements.push(
+    burySettledBatches(target, 1000);
+    target.db.exec(
       `INSERT INTO batches(id, instance_id, policy_id, policy_version, attention_channel, coalesce_key, claim_ids_json, event_ids_json, state, deadline, not_before, attempt, created_at, updated_at)
        VALUES(${sqlValue("wb_fresh")}, ${sqlValue("i")}, ${sqlValue("default")}, 1, ${sqlValue("default")}, NULL, ${sqlJson([])}, ${sqlJson([])}, ${sqlValue("needs_attention")}, NULL, ${sqlValue("2026-10-01T00:00:00.000Z")}, 1, ${sqlValue("2026-10-01T00:00:00.000Z")}, ${sqlValue("2026-10-01T00:00:00.000Z")});`,
     );
-    target.db.transaction(statements);
 
     const health = await callTool(target, "attention_wake_health");
     expect(health.deliveries.map((delivery: any) => delivery.batch_id ?? delivery.id)).toContain("wb_fresh");
     expect(target.countBatchesByState()).toMatchObject({ seen: 1000, needs_attention: 1 });
+    target.close();
+  });
+
+  it("detaches a dismissed claim from its open batch behind 1000 older batches", () => {
+    const target = bridge();
+    burySettledBatches(target, 1000);
+    const fresh = target.emit("manual", { type: "job.completed", dedupe_key: "fresh:detach", resource: { uri: "job://fresh/detach" } });
+    const [batchId] = target.tick().batches_created;
+    expect(target.getBatch(batchId)?.state).toBe("pending");
+
+    target.dismissClaim(fresh.claim!.id, "handled elsewhere");
+
+    // Left in place, the batch would later dispatch with no live claim and land in needs_attention.
+    expect(target.getBatch(batchId)).toMatchObject({ state: "cancelled", claim_ids: [] });
+    expect(target.listReceipts(batchId).map((receipt) => receipt.stage)).toContain("agent_consumed");
+    target.close();
+  });
+
+  it("filters claims by source before applying the page limit", () => {
+    const target = bridge();
+    buryRetiredClaims(target, 1000);
+    const fresh = target.emit("manual", { type: "job.completed", dedupe_key: "fresh:source", resource: { uri: "job://fresh/source" } });
+
+    expect(target.listClaims({ source: "manual", limit: 10 }).map((claim) => claim.id)).toEqual([fresh.claim!.id]);
+    target.close();
+  });
+
+  it("merges a repeated resource into its live claim behind 1000 retired ones", () => {
+    const target = bridge();
+    buryRetiredClaims(target, 1000);
+    const resource = { uri: "job://fresh/merge" };
+    const first = target.emit("manual", { type: "job.completed", dedupe_key: "fresh:merge:1", resource });
+    const second = target.emit("manual", { type: "job.completed", dedupe_key: "fresh:merge:2", resource });
+
+    expect(second.claim?.id).toBe(first.claim!.id);
+    expect(target.getClaim(first.claim!.id)?.event_ids).toEqual([first.event.id, second.event.id]);
+    target.close();
+  });
+
+  it("lists the newest claims and batches when asked", () => {
+    const target = bridge();
+    buryRetiredClaims(target, 1000);
+    burySettledBatches(target, 1000);
+    const fresh = target.emit("manual", { type: "job.completed", dedupe_key: "fresh:newest", resource: { uri: "job://fresh/newest" } });
+    const [batchId] = target.tick().batches_created;
+
+    const claims = target.listClaims({ limit: 3, newest_first: true });
+    expect(claims.map((claim) => claim.id)).toEqual(["ac_buried_998", "ac_buried_999", fresh.claim!.id]);
+    expect(target.listBatches({ limit: 2, newest_first: true }).map((batch) => batch.id)).toEqual(["wb_settled_999", batchId]);
+    expect(target.listClaims({ limit: 1 })[0]?.id).toBe("ac_buried_0");
     target.close();
   });
 });

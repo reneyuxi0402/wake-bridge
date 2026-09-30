@@ -25,6 +25,10 @@ export const CLAIM_STATES: ClaimState[] = ["pending", "deferred", "eligible", "b
 export const BATCH_STATES: BatchState[] = ["pending", "waiting_for_endpoint", "waiting_for_waiter", "dispatching", "retry_wait", "dispatched", "seen", "cancelled", "needs_attention", "dead_letter"];
 /** Claims tick() still has gates to evaluate for; the rest are terminal or already batched. */
 export const ACTIVE_CLAIM_STATES: ClaimState[] = ["pending", "deferred", "eligible"];
+/** Claims the agent has finished with; nothing will ever deliver them again. */
+export const FINALIZED_CLAIM_STATES: ClaimState[] = ["consumed", "dismissed", "expired"];
+/** Batches that have not been handed to a transport yet and can still gain or lose claims. */
+export const OPEN_BATCH_STATES: BatchState[] = ["pending", "waiting_for_endpoint", "retry_wait"];
 
 export type AttemptState = "leased" | "accepted" | "failed" | "expired";
 export type ReceiptStage = "transport_accepted" | "host_attested" | "agent_completed" | "agent_seen" | "agent_consumed" | "agent_acted";
