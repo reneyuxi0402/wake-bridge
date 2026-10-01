@@ -67,6 +67,26 @@ describe("Wake Bridge CLI", () => {
     }
   });
 
+  it("previews retention unless --apply is given, and requires an explicit age", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wake-bridge-cli-prune-"));
+    const env = { ...process.env, WAKEBRIDGE_DB: join(dir, "bridge.sqlite"), WAKEBRIDGE_INSTANCE_ID: "i", WAKEBRIDGE_OWNER_ID: "o" };
+    try {
+      const missing = spawnSync(process.execPath, ["dist/src/cli.js", "prune"], { cwd: process.cwd(), env, encoding: "utf8" });
+      expect(missing.status).toBe(1);
+      expect(missing.stderr).toContain("older_than_days must be an integer");
+
+      const preview = spawnSync(process.execPath, ["dist/src/cli.js", "prune", "--older-than-days", "30"], { cwd: process.cwd(), env, encoding: "utf8" });
+      expect(preview.status).toBe(0);
+      expect(JSON.parse(preview.stdout)).toMatchObject({ applied: false, deleted: { batches: 0, claims: 0 } });
+
+      const applied = spawnSync(process.execPath, ["dist/src/cli.js", "prune", "--older-than-days", "30", "--apply"], { cwd: process.cwd(), env, encoding: "utf8" });
+      expect(applied.status).toBe(0);
+      expect(JSON.parse(applied.stdout)).toMatchObject({ applied: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("reports the public Host Adapter contract without claiming product-host support", () => {
     const result = spawnSync(process.execPath, ["dist/src/cli.js", "doctor"], {
       cwd: process.cwd(), env: process.env, encoding: "utf8",

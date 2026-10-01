@@ -730,7 +730,13 @@ export class WakeBridge {
     if (existing) {
       const event = this.getEvent(String(existing.id))!;
       const claim = this.findClaimByEventId(event.id);
-      if (!claim) throw new BridgeError("self commitment event has no claim", "storage_corrupt", 500);
+      if (!claim) {
+        // Retention (pruneHistory) removes finished claims but keeps their events as the dedupe record.
+        if (event.state === "consumed" || event.state === "expired") {
+          throw new BridgeError("this idempotency key belongs to a finished self commitment whose history was pruned; use a new key", "claim_pruned", 409);
+        }
+        throw new BridgeError("self commitment event has no claim", "storage_corrupt", 500);
+      }
       return { event, claim, duplicate: true, warnings: this.scheduleWarnings(claim.attention_channel) };
     }
     const now = this.nowIso();

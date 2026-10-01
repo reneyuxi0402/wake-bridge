@@ -13,6 +13,7 @@ import { DaemonSourceControlClient } from "./source-control-client.js";
 import { loadSourceIngestCredentialFile } from "./source-ingress.js";
 import { loadPolicyFile } from "./policy-control.js";
 import { operatorStatus, retryDeadLetter } from "./operator-control.js";
+import { pruneHistory } from "./retention.js";
 import { loadOutOfProcessHostFile } from "./out-of-process-host.js";
 import {
   backupInstance,
@@ -31,7 +32,7 @@ const KNOWN_COMMANDS = new Set([
   "service", "doctor", "connector-catalog", "source-validate", "botlingknows-connector", "gmail-connector", "group-chat-connector",
   "daemon", "mcp", "source-bootstrap", "source-once", "policy", "emit", "claim-schedule", "claim-snooze",
   "claim-dismiss", "claim-consume", "endpoint-register", "endpoint-renew", "takeover", "presence-renew", "tick",
-  "dispatch", "inspect", "status", "batch-retry", "events", "claims", "batches", "receipts", "bindings", "endpoints",
+  "dispatch", "inspect", "status", "batch-retry", "prune", "events", "claims", "batches", "receipts", "bindings", "endpoints",
 ]);
 
 function parseArgs(values: string[]): { command: string; rest: string[]; options: Args } {
@@ -156,6 +157,7 @@ function help(): void {
       "inspect | events | claims | batches | receipts | bindings | endpoints",
       "status --config PATH (secret-free queue/host/source health; does not recover leases)",
       "batch-retry BATCH_ID --expected-attempt N --reason TEXT (reopens dead-letter only; does not dispatch)",
+      "prune --older-than-days N [--apply] (dry run unless --apply; removes finished claims/batches, never events or dedupe keys)",
       "init --data-dir PATH --instance-id ID --owner-id OWNER [--timezone ZONE]",
       "owner-token-rotate --config PATH (atomically replaces the stored owner credential)",
       "release-preflight [--config PATH]",
@@ -642,6 +644,9 @@ async function main(): Promise<void> {
         output(retryDeadLetter(bridge, { batch_id: batchId, expected_attempt: expectedAttempt, reason }));
         break;
       }
+      case "prune":
+        output(pruneHistory(bridge, { older_than_days: Number(option(parsed.options, "older_than_days")), apply: parsed.options.apply === true }));
+        break;
       // Capped lists show the newest rows (still in chronological order), not the first page ever written.
       case "events":
         output(bridge.listEvents({ newest_first: true }));

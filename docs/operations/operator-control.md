@@ -111,6 +111,36 @@ Contract：
 
 Reason 会作为本地 transition audit 保存；不要把 credential、正文或其他 secret 写进 reason。命令限制为 1–200 个可打印字符。
 
+## 历史清理
+
+Wake Bridge 默认永久保留所有记录，不会自动删除任何东西。需要控制库的增长时，由 operator 显式执行：
+
+```bash
+wakebridge prune --config /path/to/wakebridge.config.json --older-than-days 30          # 只预览
+wakebridge prune --config /path/to/wakebridge.config.json --older-than-days 30 --apply  # 实际删除
+```
+
+不带 `--apply` 时只返回将被删除的数量，不改动数据库。`--older-than-days` 必填，范围 1–3650，按记录最后更新时间计算。
+
+会删除（最后更新早于截止时间）：
+
+- 状态为 `seen` 或 `cancelled`、且不再携带任何仍可投递 Claim 的 batch，连同它的状态转换、attempt、receipt 与 delivery
+  correlation；
+- 已 `consumed`、`dismissed` 或 `expired`、且没有任何保留下来的 batch 再引用的 Claim，连同它的状态转换。
+
+永远不删除：Event、event status 与 event transition、idempotency key。它们是去重记录：删掉后，来源重投旧事件或 agent 重放旧的
+schedule 请求都会被当成新工作再次唤醒。`pending`、`waiting_for_endpoint`、`retry_wait`、`dispatching`、`dispatched`、
+`needs_attention` 与 `dead_letter` batch，以及任何仍可能再次投递的 Claim，无论多旧都保留。
+
+清理之后：
+
+- 来源重投已清理事件时仍返回 `duplicate: true`，只是不再附带 Claim；
+- 用同一个 idempotency key 重放已清理的 self commitment 会得到 `claim_pruned`（409），需要换一个新 key；
+- SQLite 文件不会立刻变小，释放的页会被后续写入复用。
+
+预览、计数和删除在同一个写事务里完成，可以在 daemon 运行时执行。建议首次 `--apply` 前先用
+[release lifecycle](release-lifecycle.md) 的 backup 留一份快照。
+
 ## 仍未覆盖的 operator hardening
 
 本票没有承诺 metrics backend、长期 structured log pipeline、dead-letter bulk replay、任意 export、Linux/systemd、端口扫描或自动
