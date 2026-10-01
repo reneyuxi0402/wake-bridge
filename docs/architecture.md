@@ -1,6 +1,6 @@
 # 架构与路由
 
-状态：`0.9.0-preview.9` current public contract。首版 deployment topology 为单 Agent Space
+状态：`0.9.0-preview.14` current public contract。首版 deployment topology 为单 Agent Space
 instance；共享 service 多 Space 已延后为 post-MVP proposal。
 
 ## 1. 系统边界
@@ -173,7 +173,8 @@ Attention Claim 表示“某个 resource 从某个时刻起值得重新获得一
 - agent capability 可以在自己的 space 内事务性创建 `self_commitment` event + claim；
 - claim 支持 pending、deferred、eligible、batched、consumed、dismissed、expired；
 - snooze 只改变下一次 eligible 时间，不改写来源事实；
-- agent 从其他路径已经处理来源时，Bridge 中出现 stale claim 是正常边界，醒来后重新验证并廉价 dismiss。
+- agent 从其他路径已经处理来源时，Bridge 中出现 stale claim 是正常边界，醒来后重新验证并廉价 dismiss；
+- 已结束的 Claim 与 Batch 默认永久保留；operator 可以显式执行 retention 清理，但 Event 与去重记录永不删除。
 
 ### Scheduler / Batcher
 

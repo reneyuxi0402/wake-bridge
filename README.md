@@ -14,6 +14,8 @@ Wake Bridge 是一个 local-first 的 **agent attention scheduler and delivery c
 - versioned event/source/transport SDK；
 - out-of-process loopback Host Adapter Contract；
 - 可选的 Claude CLI 在线会话 Host Adapter（Claude custom channels research preview）；
+- 默认关闭的小机知道与 Gmail Source Connector；
+- secret-free operator status、确认超时告警、dead-letter 受控重试与显式的历史清理（retention）；
 - 单 Agent Principal / 单 Agent Space / 单 daemon 的本地部署。
 
 当前公开边界见 [架构与路由](docs/architecture.md) 和
@@ -129,7 +131,7 @@ Source Connector 的本地协议、身份 fencing、cursor CAS 与错误处理�
 ## Preview 安装
 
 当前 package 名称为 `wake-bridge`，每个版本都发布到 npm 的 `latest` dist-tag。`0.9.0-preview.14` 支持 macOS arm64/x64，以及带 systemd
-user service 的 Linux x64；需要 Node.js 20+ 与 SQLite CLI 3.33+。Linux 实机证据来自 Ubuntu 22.04 LTS x64，Ubuntu
+user service 的 Linux x64；需要 Node.js 20+ 与带 JSON1 的 SQLite CLI 3.33+。Linux 实机证据来自 Ubuntu 22.04 LTS x64，Ubuntu
 24.04 x64 当前只有 CI 证据；Linux arm64、容器、WSL、NAS 与无 systemd 环境不在已验证矩阵。部署路径见
 [Linux VPS runbook](docs/operations/linux-vps.md)。
 
@@ -220,10 +222,12 @@ Wake Bridge 仍会可靠保存 Event、Claim 与 Batch，但 delivery 明确停�
 - [Source Connector](docs/operations/source-connectors.md)
 - [Source-scoped ingress](docs/operations/source-ingress.md)
 - [Personal policy](docs/operations/policies.md)
+- [Operator status、恢复与历史清理](docs/operations/operator-control.md)
 - [Explicit inactivity watch](docs/inactivity-watch.md)
 - [Release lifecycle](docs/operations/release-lifecycle.md)
 - [公开验证口径](docs/verification.md)
 - [小机知道 Source Connector](docs/adapters/botlingknows.md)
+- [Gmail Source Connector](docs/adapters/gmail.md)
 - [Claude CLI Host Adapter](host-adapters/claude-cli/README.md)
 
 ## 项目词汇

@@ -148,7 +148,8 @@ nonce echo 可以和原 transport request 并发发生：若 host 已证明注�
 入口。
 
 自 preview.10 起，Core 默认在接受投递 30 分钟后仍无 agent ack 时标记 `needs_attention` / `ack_timeout`，而不是重新发送已接受的
-delivery。该时限可由 operator 配置；合法的迟到 agent ack 或当前 attempt 的 nonce echo 仍可收尾，但 generation fencing 不变。Adapter 的 busy queue、
+delivery。该时限可由 operator 配置；合法的迟到 agent ack 或当前 attempt 的 nonce echo 仍可收尾，但 generation fencing 不变；batch 的全部 claim 都被
+consume/dismiss/expire 后，Core 也会把它收尾为 `cancelled`。Adapter 的 busy queue、
 实际注入与换窗处置仍由 adapter 负责；ack/consume/dismiss 不表示 Core 能撤回 adapter 已接收的消息。
 
 ## 5. 支持边界

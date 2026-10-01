@@ -1,6 +1,6 @@
 # 协议与数据模型
 
-状态：`0.9.0-preview.9` current public contract。Event、Claim、policy、watch、binding、Batch 与 receipt 的
+状态：`0.9.0-preview.14` current public contract。Event、Claim、policy、watch、binding、Batch 与 receipt 的
 逻辑边界有效；首版 topology 是单 Agent Space instance。policy v1 当前面见第 5、11 节；service registry/enrollment 是
 post-MVP proposal。
 
@@ -285,7 +285,9 @@ pending → deferred → eligible → batched → consumed
 - policy 可以从 event 创建 Claim 或 suppress；
 - agent capability 的 `claim.schedule(...)` 必须在自己的 space 内同一事务写入一条 `self_commitment` event 与对应 Claim；
 - snooze/dismiss/consume 不修改来源正文或来源 read state；
-- agent 可能已经从其他路径处理了 resource，Claim 仍保持 pending 是正常的跨系统陈旧状态；消费前必须 revalidate，已处理则廉价 dismiss。
+- agent 可能已经从其他路径处理了 resource，Claim 仍保持 pending 是正常的跨系统陈旧状态；消费前必须 revalidate，已处理则廉价 dismiss；
+- 已 consume/dismiss/expire 的 Claim 默认永久保留，只有 operator 显式执行 retention 时才会删除（见第 14 节）。Event 与去重记录永远保留，
+  因此重复投递仍是 duplicate，不会重新生成 Claim；用同一 idempotency key 重放已被清理的 self-commitment 返回 `claim_pruned`。
 
 ## 7. Foreground Presence Lease
 
@@ -441,7 +443,8 @@ batch 等待 endpoint，不依赖未经证明的 cold route。
 - `source.register(config)`：管理员创建 source subscription；
 - `source.sync(source_id)`：手动触发一次增量读取；
 - `event.emit(delivery)`：已认证 producer 通过通用 contract 提交事件；
-- `event.list(state?, source?, after?)`：读取当前 Agent Space 的事件索引；
+- `event.list(state?, source?, after?, limit?)`：读取当前 Agent Space 的事件索引；不带 `after` 时返回最近 `limit` 条，带 `after` 时从该时间向后翻页，
+  结果都按时间从旧到新；
 - `policy.list/install/test/preview(...)`：owner-only；JSON v1 当前只接受 `immediate | scheduled | suppress`，test/preview 不执行写入；
 - `(policy_id, version)` append-only；更新必须升 version，Claim 保持匹配时冻结的 version；
 - `debounce/digest/max_delay/resume_spread/transport preference/busy behavior` 已从当前 contract 移除；历史 DB row 只读保留且不参与新事件匹配。
@@ -449,7 +452,7 @@ batch 等待 endpoint，不依赖未经证明的 cold route。
 ### claim / presence
 
 - `claim.schedule(resource, eligible_after, reason_code, note?)`：agent-only；在当前 space 事务性创建 self-commitment event + Claim；
-- `claim.list(state?, channel?, source?)`；
+- `claim.list(state?, channel?, source?, limit?)`：返回最近 `limit` 条，按创建时间从旧到新；完整计数用 status，不受列表上限影响；
 - `claim.snooze(claim_id, until)`；
 - `claim.dismiss(claim_id, reason?)`；
 - `claim.consume(claim_id, result?)`；
@@ -639,7 +642,8 @@ dispatched
 
 needs_attention (ack_timeout only)
   ├─ valid late agent ack → seen
-  └─ valid late host echo → seen
+  ├─ valid late host echo → seen
+  └─ all claims finalized → cancelled
 ```
 
 状态更新记录 attempt id；迟到 worker 不能覆盖新状态。
@@ -653,12 +657,16 @@ needs_attention (ack_timeout only)
 `host_attested`，不会冒充 agent 行为。endpoint、generation
 与 attempt fencing 不变，旧窗口不能替新窗口确认。旧版本留下的 accepted batch 按同一规则检查，无需 schema migration。
 
+若超时 batch 携带的每条 Claim 后来都已 consume、dismiss 或 expire，canonical dispatcher 会在下一轮把它收尾为 `cancelled`
+（转换原因 `all_claims_finalized_reconciled`，`last_error` 保留 `ack_timeout`）。它至少在 `needs_attention` 停留一轮，已配置的
+incident 照常产生；只要还有一条可能再次投递的 Claim，本项异常就保持打开。
+
 可选的 `incident_attention_channel`（或 `WAKEBRIDGE_INCIDENT_ATTENTION_CHANNEL`）会把新发生的 `ack_timeout` 与 source
 `needs_attention` 投影成去重的 `wakebridge.core/core.incident` Event + Claim。默认关闭。Core incident 自身的确认超时不再生成
 incident，防止递归；相同 source error episode 以 source、error class、checkpoint revision 与最近成功时间去重。
 
-`cancelled` 是未投递 batch 的可审计终态：其中最后一个 claim 在其他路径被 consume/dismiss/expire 后，batch 不再有工作可做。
-这不是 operator incident，不计入 `needs_attention`。
+`cancelled` 是不再有工作可做的 batch 的可审计终态：未投递 batch 的最后一个 claim 在其他路径被 consume/dismiss/expire，
+或确认超时 batch 的全部 claim 都已处理。这不是 operator incident，不计入 `needs_attention`。
 
 ### Operator retry
 
@@ -669,6 +677,16 @@ credential 都没有这项 authority。
 
 统一 operator status 是 secret-free read model：允许 batch/error class、channel/endpoint generation 与 source health；禁止 route
 address、session ref、provider error message、credential 与正文。Offline status 不恢复 dispatcher lease，live status 只能由 owner API 读取。
+
+### History retention
+
+Core 默认永久保留全部记录。Operator 可以显式执行 retention，删除最后更新早于截止时间的已结束历史：不再携带可投递 Claim 的
+`seen`/`cancelled` batch 及其 transition、attempt、receipt 与 delivery correlation，以及没有保留 batch 引用的
+consumed/dismissed/expired Claim 及其 transition。Event、event status/transition 与 idempotency key 是去重记录，永不删除；
+open、in-flight、`needs_attention`、`dead_letter` batch 与仍可投递的 Claim 不受年龄影响。命令与清理后的行为见
+[operator control](operations/operator-control.md)。
+
+多语句状态变更都在单个 SQLite 事务中执行；任一语句失败时整笔回滚，调用方看到错误即表示没有部分写入。
 
 ## 15. 隐私与可观测性
 

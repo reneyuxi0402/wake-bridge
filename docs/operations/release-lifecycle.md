@@ -12,14 +12,15 @@
 | OS | macOS；带 systemd user service 的 Linux |
 | CPU | macOS arm64/x64；Linux x64 已验证，Linux arm64 尚未验证 |
 | Node.js | 20 或更高 |
-| SQLite CLI | 3.33.0 或更高，且必须支持 `-json` |
+| SQLite CLI | 3.33.0 或更高，必须支持 `-json` 输出与 JSON1 函数（`json_each`） |
 | topology | 每个 Agent Space 一个本地 instance / SQLite DB |
 | schema | current 8；显式升级支持 6、7 → 8 |
 | host integration | out-of-process Host Adapter Contract v1；不内置具体 agent 产品支持 |
 
-`0.9.0-preview.9` 的 npm manifest 允许 macOS 与 Linux，并按平台生成 LaunchAgent 或 systemd user unit。Linux 实机证据来自
+自 `0.9.0-preview.9` 起，npm manifest 允许 macOS 与 Linux，并按平台生成 LaunchAgent 或 systemd user unit。Linux 实机证据来自
 Ubuntu 22.04 LTS x64 / systemd 249 的连续两轮 reboot canary；Ubuntu 24.04 x64 当前只有 CI 证据。
-SQLite 是外部 runtime prerequisite，不由 npm 安装；3.33.0 是 CLI 加入 JSON output mode 的版本。
+SQLite 是外部 runtime prerequisite，不由 npm 安装；3.33.0 是 CLI 加入 JSON output mode 的版本。JSON1 自 3.38.0 起默认内置，
+更早的版本需在编译时启用。macOS 自带版本与 CI 使用的 Ubuntu 24.04 均满足；其他环境以 `release-preflight` 的 `json_functions` 为准。
 
 Linux 的安装、linger、journal 与回滚步骤见 [Linux VPS runbook](linux-vps.md)。Wake Bridge、
 Source Connector、Host Adapter 与 agent runtime 必须同机；跨机器 Remote Host Adapter 不在该 profile 内。
@@ -30,7 +31,7 @@ Source Connector、Host Adapter 与 agent runtime 必须同机；跨机器 Remot
 
 ```bash
 npm pack --json
-npm install --global ./wake-bridge-0.9.0-preview.9.tgz
+npm install --global ./wake-bridge-0.9.0-preview.14.tgz
 wakebridge release-preflight
 ```
 
@@ -48,8 +49,8 @@ GitHub-hosted runner 上重新执行 typecheck、全量测试与 `npm pack`，�
 把同一个 tarball 发布到 `latest`，随后创建带 tarball 和 SHA-256 清单的 GitHub pre-release。
 
 ```bash
-git tag v0.9.0-preview.9
-git push origin v0.9.0-preview.9
+git tag v0.9.0-preview.14
+git push origin v0.9.0-preview.14
 ```
 
 发布链路不保存长期 npm token。workflow 文件固定为 `.github/workflows/publish.yml`；npm package 的

@@ -1,7 +1,7 @@
 # Linux VPS deployment
 
-状态：`wake-bridge@0.9.0-preview.9` current runbook。Ubuntu 22.04 LTS x64 / systemd 249 已完成真实 VPS 连续两轮 reboot
-canary；Ubuntu 24.04 x64 已在 CI 验证，但尚无独立真实 VPS 证据。Linux arm64、容器、WSL、NAS 与无 systemd 环境不在
+状态：适用于 `wake-bridge@0.9.0-preview.14`；service 与 release lifecycle 自 `0.9.0-preview.9` 起未变。Ubuntu 22.04 LTS x64 /
+systemd 249 在 `0.9.0-preview.9` 上完成了真实 VPS 连续两轮 reboot canary；Ubuntu 24.04 x64 已在 CI 验证，但尚无独立真实 VPS 证据。Linux arm64、容器、WSL、NAS 与无 systemd 环境不在
 已验证矩阵。
 
 ## 1. 支持边界
@@ -28,7 +28,7 @@ sudo useradd --create-home --shell /bin/bash wakebridge
 sudo loginctl enable-linger wakebridge
 ```
 
-Ubuntu 需要 Node.js 20+ 与支持 JSON output 的 SQLite CLI 3.33+。Node 安装方式由 operator 选择；SQLite 可来自系统仓库：
+Ubuntu 需要 Node.js 20+ 与支持 JSON output 和 JSON1 函数的 SQLite CLI 3.33+（Ubuntu 24.04 系统仓库版本已由 CI 验证；其他版本以 `wakebridge release-preflight` 的 `json_functions` 为准）。Node 安装方式由 operator 选择；SQLite 可来自系统仓库：
 
 ```sh
 sudo apt-get update
