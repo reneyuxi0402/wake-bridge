@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -61,6 +61,34 @@ describe("Wake Bridge CLI", () => {
         host_kind: "mock",
         session_ref: "current",
         routes: [{ kind: "mock", address: {} }],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails release-preflight when the SQLite CLI has JSON output but no JSON1 functions", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wake-bridge-cli-sqlite-"));
+    // A pre-3.38 CLI built without JSON1: `-json` output works, json_each does not.
+    writeFileSync(join(dir, "sqlite3"), [
+      "#!/bin/sh",
+      'if [ "$1" = "--version" ]; then echo "3.37.2 2022-01-06 test"; exit 0; fi',
+      'input=$(cat)',
+      'case "$input" in *json_each*|*json_array_length*) echo "Parse error: no such function: json_array_length" >&2; exit 1;; esac',
+      "echo '[{\"ok\":1}]'",
+      "",
+    ].join("\n"));
+    chmodSync(join(dir, "sqlite3"), 0o755);
+    try {
+      const result = spawnSync(process.execPath, ["dist/src/cli.js", "release-preflight"], {
+        cwd: process.cwd(),
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+        encoding: "utf8",
+      });
+      expect(result.status).toBe(2);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        ok: false,
+        runtime: { sqlite3: { installed_version: "3.37.2", json_output: true, json_functions: false, supported: false } },
       });
     } finally {
       rmSync(dir, { recursive: true, force: true });
