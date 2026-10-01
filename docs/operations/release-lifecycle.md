@@ -31,7 +31,7 @@ Source Connector、Host Adapter 与 agent runtime 必须同机；跨机器 Remot
 
 ```bash
 npm pack --json
-npm install --global ./wake-bridge-0.9.0-preview.14.tgz
+npm install --global ./wake-bridge-0.9.0-preview.15.tgz
 wakebridge release-preflight
 ```
 
@@ -49,9 +49,18 @@ GitHub-hosted runner 上重新执行 typecheck、全量测试与 `npm pack`，�
 把同一个 tarball 发布到 `latest`，随后创建带 tarball 和 SHA-256 清单的 GitHub pre-release。
 
 ```bash
-git tag v0.9.0-preview.14
-git push origin v0.9.0-preview.14
+git tag v0.9.0-preview.15
+git push origin v0.9.0-preview.15
 ```
+
+打 tag 之前，先把仍写着上一个版本号的“当前版本”标注一并更新（README、quickstart、protocol、architecture、public SDK、
+operator control、Linux runbook、verification 与 release lifecycle 示例）：
+
+```bash
+git grep -n "0.9.0-preview.<上一个版本>" -- README.md docs ':!docs/releases'
+```
+
+只记录历史事实的句子（例如“自某版本起”）保持原样。
 
 发布链路不保存长期 npm token。workflow 文件固定为 `.github/workflows/publish.yml`；npm package 的
 trusted publisher 必须限制到 `reneyuxi0402/wake-bridge` 和这个文件，并允许 direct publish。

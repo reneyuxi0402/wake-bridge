@@ -1,6 +1,6 @@
 # Linux VPS deployment
 
-状态：适用于 `wake-bridge@0.9.0-preview.14`；service 与 release lifecycle 自 `0.9.0-preview.9` 起未变。Ubuntu 22.04 LTS x64 /
+状态：适用于 `wake-bridge@0.9.0-preview.15`；service 与 release lifecycle 自 `0.9.0-preview.9` 起未变。Ubuntu 22.04 LTS x64 /
 systemd 249 在 `0.9.0-preview.9` 上完成了真实 VPS 连续两轮 reboot canary；Ubuntu 24.04 x64 已在 CI 验证，但尚无独立真实 VPS 证据。Linux arm64、容器、WSL、NAS 与无 systemd 环境不在
 已验证矩阵。
 
