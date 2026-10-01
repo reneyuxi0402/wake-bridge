@@ -72,8 +72,9 @@ jobs:
           EOF
           shasum -a 256 release-artifacts/*.tgz > release-artifacts/SHA256SUMS
 
-      - name: Publish to npm preview
-        run: npm publish "./${{ steps.pack.outputs.filename }}" --access public --tag preview --provenance
+      - name: Publish to npm latest
+        # Prerelease versions need an explicit tag; Trusted Publishing can set only this one.
+        run: npm publish "./${{ steps.pack.outputs.filename }}" --access public --tag latest --provenance
 
       - name: Create GitHub pre-release
         env:

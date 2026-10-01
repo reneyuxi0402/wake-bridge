@@ -20,7 +20,7 @@
 [Linux VPS runbook](operations/linux-vps.md) 执行 preflight 与本机 canary：
 
 ```sh
-npm install --global wake-bridge@preview
+npm install --global wake-bridge
 wakebridge release-preflight
 
 wakebridge init \

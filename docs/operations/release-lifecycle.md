@@ -7,7 +7,7 @@
 
 | 项目 | 当前承诺 |
 | --- | --- |
-| package | `wake-bridge`，npm dist-tag `preview` |
+| package | `wake-bridge`，npm dist-tag `latest` |
 | license | Apache-2.0 |
 | OS | macOS；带 systemd user service 的 Linux |
 | CPU | macOS arm64/x64；Linux x64 已验证，Linux arm64 尚未验证 |
@@ -34,10 +34,10 @@ npm install --global ./wake-bridge-0.9.0-preview.9.tgz
 wakebridge release-preflight
 ```
 
-正式发布到 preview channel 后，等价安装命令是：
+正式发布到 npm 后，等价安装命令是：
 
 ```bash
-npm install --global wake-bridge@preview
+npm install --global wake-bridge
 ```
 
 ## Maintainer release
@@ -45,7 +45,7 @@ npm install --global wake-bridge@preview
 公开版本由 GitHub tag 驱动的 release workflow 发布。发布前必须同时提交版本号与
 `docs/releases/<version>.md`，并确保 tag 精确等于 `v<version>`。推送 tag 后，workflow 会在
 GitHub-hosted runner 上重新执行 typecheck、全量测试与 `npm pack`，通过 npm Trusted Publishing/OIDC
-把同一个 tarball 发布到 `preview`，随后创建带 tarball 和 SHA-256 清单的 GitHub pre-release。
+把同一个 tarball 发布到 `latest`，随后创建带 tarball 和 SHA-256 清单的 GitHub pre-release。
 
 ```bash
 git tag v0.9.0-preview.9

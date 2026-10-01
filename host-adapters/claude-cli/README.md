@@ -28,7 +28,7 @@ Complete Claude's normal first-run interactive onboarding as well as authenticat
 The adapter is not a separate package. Install the Wake Bridge preview:
 
 ```sh
-npm install --global wake-bridge@preview
+npm install --global wake-bridge
 wakebridge-claude --help
 ```
 
