@@ -53,7 +53,7 @@ export interface ReleasePreflight {
   };
   runtime: {
     node: { installed_version: string; minimum_major: number; supported: boolean };
-    sqlite3: { available: boolean; installed_version: string | null; minimum_version: string; supported: boolean; json_output: boolean };
+    sqlite3: { available: boolean; installed_version: string | null; minimum_version: string; supported: boolean; json_output: boolean; json_functions: boolean };
   };
   instance: {
     configured: boolean;
@@ -94,7 +94,7 @@ function sqlite(args: string[], input?: string): string {
   return (result.stdout || "").trim();
 }
 
-function sqliteVersion(): { available: boolean; version: string | null; json_output: boolean } {
+function sqliteVersion(): { available: boolean; version: string | null; json_output: boolean; json_functions: boolean } {
   try {
     const raw = sqlite(["--version"]);
     const version = raw.split(/\s+/u)[0] || null;
@@ -105,9 +105,18 @@ function sqliteVersion(): { available: boolean; version: string | null; json_out
     } catch {
       jsonOutput = false;
     }
-    return { available: true, version, json_output: jsonOutput };
+    // Core queries claim and batch id arrays with json_each/json_array_length.  JSON1 is
+    // built in from SQLite 3.38; older CLIs only have it when compiled with it.
+    let jsonFunctions = false;
+    try {
+      const parsed = JSON.parse(sqlite(["-batch", "-json", ":memory:"], "SELECT json_array_length('[1]') AS ok, (SELECT COUNT(*) FROM json_each('[1,2]')) AS rows;\n")) as Array<{ ok?: number; rows?: number }>;
+      jsonFunctions = parsed[0]?.ok === 1 && parsed[0]?.rows === 2;
+    } catch {
+      jsonFunctions = false;
+    }
+    return { available: true, version, json_output: jsonOutput, json_functions: jsonFunctions };
   } catch {
-    return { available: false, version: null, json_output: false };
+    return { available: false, version: null, json_output: false, json_functions: false };
   }
 }
 
@@ -148,7 +157,8 @@ export function releasePreflight(configPath?: string, runtime: ReleaseRuntime = 
   const architectureSupported = (SUPPORTED_ARCHITECTURES as readonly string[]).includes(architecture);
   const sqliteSupported = Boolean(sqliteRuntime.version)
     && versionAtLeast(sqliteRuntime.version!, MINIMUM_SQLITE_VERSION)
-    && sqliteRuntime.json_output;
+    && sqliteRuntime.json_output
+    && sqliteRuntime.json_functions;
   const instance: ReleasePreflight["instance"] = {
     configured: Boolean(configPath),
     config_path: configPath ? resolve(configPath) : null,
@@ -194,6 +204,7 @@ export function releasePreflight(configPath?: string, runtime: ReleaseRuntime = 
         minimum_version: MINIMUM_SQLITE_VERSION,
         supported: sqliteSupported,
         json_output: sqliteRuntime.json_output,
+        json_functions: sqliteRuntime.json_functions,
       },
     },
     instance,

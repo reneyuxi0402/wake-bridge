@@ -138,7 +138,7 @@ describe("release lifecycle", () => {
       expect(preflight).toMatchObject({
         ok: true,
         release: { platform: "darwin", architecture: "arm64", platform_supported: true, architecture_supported: true },
-        runtime: { node: { supported: true }, sqlite3: { supported: true, json_output: true } },
+        runtime: { node: { supported: true }, sqlite3: { supported: true, json_output: true, json_functions: true } },
         instance: { schema_state: "current", integrity: "ok", security_ready: true },
       });
 
@@ -173,7 +173,7 @@ describe("release lifecycle", () => {
       expect(preflight).toMatchObject({
         ok: true,
         release: { platform: "linux", architecture: "x64", platform_supported: true, architecture_supported: true },
-        runtime: { node: { supported: true }, sqlite3: { supported: true, json_output: true } },
+        runtime: { node: { supported: true }, sqlite3: { supported: true, json_output: true, json_functions: true } },
         instance: { schema_state: "current", integrity: "ok", security_ready: true },
       });
 
