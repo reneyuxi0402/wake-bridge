@@ -1,6 +1,6 @@
 # 架构与路由
 
-状态：`0.9.0-preview.15` current public contract。首版 deployment topology 为单 Agent Space
+状态：`0.9.0-preview.16` current public contract。首版 deployment topology 为单 Agent Space
 instance；共享 service 多 Space 已延后为 post-MVP proposal。
 
 ## 1. 系统边界

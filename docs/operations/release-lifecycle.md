@@ -31,7 +31,7 @@ Source Connector、Host Adapter 与 agent runtime 必须同机；跨机器 Remot
 
 ```bash
 npm pack --json
-npm install --global ./wake-bridge-0.9.0-preview.15.tgz
+npm install --global ./wake-bridge-0.9.0-preview.16.tgz
 wakebridge release-preflight
 ```
 
@@ -49,8 +49,8 @@ GitHub-hosted runner 上重新执行 typecheck、全量测试与 `npm pack`，�
 把同一个 tarball 发布到 `latest`，随后创建带 tarball 和 SHA-256 清单的 GitHub pre-release。
 
 ```bash
-git tag v0.9.0-preview.15
-git push origin v0.9.0-preview.15
+git tag v0.9.0-preview.16
+git push origin v0.9.0-preview.16
 ```
 
 打 tag 之前，先把仍写着上一个版本号的“当前版本”标注一并更新（README、quickstart、protocol、architecture、public SDK、

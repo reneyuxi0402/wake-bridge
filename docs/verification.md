@@ -1,6 +1,6 @@
 # 公开验证口径
 
-状态：`wake-bridge@0.9.0-preview.15` release candidate；发布后由 npm `latest` 与 GitHub pre-release 提供同一 tarball。
+状态：`wake-bridge@0.9.0-preview.16` release candidate；发布后由 npm `latest` 与 GitHub pre-release 提供同一 tarball。
 
 公共仓库用以下证据验证自身，不用具体宿主产品的现场结果代替通用契约：
 
