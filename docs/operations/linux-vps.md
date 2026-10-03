@@ -89,6 +89,20 @@ wakebridge service install \
   --port 4311
 ```
 
+带 Host Adapter/Source 配置时，install 前先用同一组文件跑 doctor。`release-preflight` 只检查 release、runtime 与 instance，
+不读取这些文件：
+
+```sh
+wakebridge doctor \
+  --config "$WAKEBRIDGE_STATE_DIR/wakebridge.config.json" \
+  --host-adapters "$WAKEBRIDGE_STATE_DIR/host-adapters.json" \
+  --source-credentials "$WAKEBRIDGE_STATE_DIR/source-credentials.json"
+```
+
+`hosts.configured_adapters.error` 与 `security.source_ingress.error` 应为 `null`。当前 shell 未载入 `daemon.env` 时，doctor 会在
+Host Adapter 文件本身通过校验之后报告 bootstrap token 缺失，这一项留到 service 启动后确认即可。任一文件校验失败，daemon 都会在
+监听端口之前退出，systemd 按 `Restart=on-failure` 反复重启；具体原因写在 `journalctl` 里。
+
 带 Host Adapter/Source 配置的 daemon：
 
 ```sh

@@ -111,6 +111,35 @@ describe("out-of-process local Host Adapter protocol", () => {
     expect(() => loadOutOfProcessHostFile(path, { WAKEBRIDGE_FIXTURE_HOST_TOKEN: HOST_TOKEN })).toThrow(/exact_live_route/u);
   });
 
+  it("names the invalid field in a host adapter file and checks the whole file before token env", () => {
+    const root = mkdtempSync(join(tmpdir(), "wake-bridge-host-file-errors-"));
+    const path = join(root, "hosts.json");
+    const valid = {
+      id: "fixture-host", adapter_kind: "fixture_host_bridge", adapter_version: "1.0.0", host_kind: "fixture_runner",
+      tested_host_versions: ["fixture-1"], token_env: "WAKEBRIDGE_FIXTURE_HOST_TOKEN", attention_channels: ["life"],
+      capabilities: { exact_live_route: true, requires_live_binding: true }, receipt_upper_bound: "host_accepted",
+    };
+    const without = (field: string) => Object.fromEntries(Object.entries(valid).filter(([key]) => key !== field));
+    const load = (adapters: unknown[], environment: NodeJS.ProcessEnv = { WAKEBRIDGE_FIXTURE_HOST_TOKEN: HOST_TOKEN }) => {
+      writeFileSync(path, JSON.stringify({ version: 1, adapters }));
+      return () => loadOutOfProcessHostFile(path, environment);
+    };
+
+    expect(load([without("receipt_upper_bound")]))
+      .toThrow("out-of-process host receipt_upper_bound is required; use accepted_to_live_pipe or host_accepted");
+    expect(load([{ ...valid, receipt_upper_bound: "agent_completed" }])).toThrow(/receipt_upper_bound cannot be agent_completed/u);
+    expect(load([{ ...valid, receipt_upper_bound: "live_pipe" }])).toThrow(/receipt_upper_bound is unsupported/u);
+    expect(load([without("tested_host_versions")]))
+      .toThrow("out-of-process host tested_host_versions is missing or not an array of strings");
+    expect(load([{ ...valid, attention_channels: [] }])).toThrow(/attention_channels must list at least one entry/u);
+    expect(load([{ ...valid, adapter_kind: "Fixture" }])).toThrow(/adapter_kind is missing or does not match/u);
+    expect(load([{ ...valid, token_env: "fixture_token" }])).toThrow(/token_env is missing or does not match/u);
+
+    const second = { ...without("receipt_upper_bound"), id: "second-host", adapter_kind: "second_host_bridge" };
+    expect(load([valid, second], {})).toThrow(/receipt_upper_bound is required/u);
+    expect(load([valid], {})).toThrow(/WAKEBRIDGE_FIXTURE_HOST_TOKEN/u);
+  });
+
   it("reports external adapter readiness through doctor without printing credentials", () => {
     const root = mkdtempSync(join(tmpdir(), "wake-bridge-host-doctor-"));
     const initialized = initializeInstance({
@@ -134,6 +163,24 @@ describe("out-of-process local Host Adapter protocol", () => {
       hosts: { configured_adapters: { configured: true, adapter_count: 1, adapters: [{ adapter_kind: "fixture_host_bridge", support_tier: "experimental" }], error: null } },
     });
     expect(doctor.stdout).not.toContain(HOST_TOKEN);
+
+    // Without the daemon environment, doctor still names the file mistake rather than the missing token.
+    writeFileSync(path, JSON.stringify({
+      version: 1,
+      adapters: [{
+        id: "fixture-host", adapter_kind: "fixture_host_bridge", adapter_version: "1.0.0", host_kind: "fixture_runner",
+        tested_host_versions: ["fixture-1"], token_env: "WAKEBRIDGE_FIXTURE_HOST_TOKEN", attention_channels: ["life"],
+        capabilities: { exact_live_route: true, requires_live_binding: true },
+      }],
+    }));
+    const invalid = spawnSync(process.execPath, [
+      "dist/src/cli.js", "doctor", "--config", initialized.config_path, "--host-adapters", path,
+    ], { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, WAKEBRIDGE_FIXTURE_HOST_TOKEN: "" } });
+    expect(invalid.status, invalid.stderr).toBe(0);
+    expect(JSON.parse(invalid.stdout)).toMatchObject({
+      ok: false,
+      hosts: { configured_adapters: { error: "out-of-process host receipt_upper_bound is required; use accepted_to_live_pipe or host_accepted" } },
+    });
   });
 
   it("registers an exact external session, delivers once, observes its wake echo, and fails closed after exit", async () => {

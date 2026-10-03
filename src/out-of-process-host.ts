@@ -20,6 +20,7 @@ const VERSION = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/u;
 const TOKEN_ENV = /^[A-Z_][A-Z0-9_]{0,127}$/u;
 const PRINTABLE = /^[^\u0000-\u001f\u007f]{1,256}$/u;
 const MAX_DECLARATIONS = 32;
+const RECEIPT_UPPER_BOUNDS: readonly string[] = ["accepted_to_live_pipe", "host_accepted"];
 
 export interface OutOfProcessHostReference {
   id: string;
@@ -45,24 +46,46 @@ export interface LoadedOutOfProcessHosts {
 }
 
 function boundedPrintable(values: unknown, field: string, required = false): string[] {
-  if (!Array.isArray(values) || values.length > MAX_DECLARATIONS || (required && values.length === 0)
-    || values.some((value) => typeof value !== "string" || !PRINTABLE.test(value))) {
-    throw new BridgeError(`out-of-process host ${field} are invalid`, "invalid_host_adapter_file", 400);
+  if (!Array.isArray(values)) {
+    throw new BridgeError(`out-of-process host ${field} is missing or not an array of strings`, "invalid_host_adapter_file", 400);
+  }
+  if (required && values.length === 0) {
+    throw new BridgeError(`out-of-process host ${field} must list at least one entry`, "invalid_host_adapter_file", 400);
+  }
+  if (values.length > MAX_DECLARATIONS) {
+    throw new BridgeError(`out-of-process host ${field} must list at most ${MAX_DECLARATIONS} entries`, "invalid_host_adapter_file", 400);
+  }
+  if (values.some((value) => typeof value !== "string" || !PRINTABLE.test(value))) {
+    throw new BridgeError(`out-of-process host ${field} entries must be printable strings of 1 to 256 characters`, "invalid_host_adapter_file", 400);
   }
   return [...values];
 }
 
-function normalizedManifest(reference: OutOfProcessHostReference): HostAdapterManifest {
-  if (!IDENTIFIER.test(reference.adapter_kind || "") || !VERSION.test(reference.adapter_version || "")
-    || !IDENTIFIER.test(reference.host_kind || "")) {
-    throw new BridgeError("out-of-process host adapter identity is invalid", "invalid_host_adapter_file", 400);
+function requirePattern(value: unknown, field: string, pattern: RegExp): void {
+  if (typeof value !== "string" || !pattern.test(value)) {
+    throw new BridgeError(`out-of-process host ${field} is missing or does not match ${pattern.source}`, "invalid_host_adapter_file", 400);
   }
+}
+
+function normalizedManifest(reference: OutOfProcessHostReference): HostAdapterManifest {
+  requirePattern(reference.adapter_kind, "adapter_kind", IDENTIFIER);
+  requirePattern(reference.adapter_version, "adapter_version", VERSION);
+  requirePattern(reference.host_kind, "host_kind", IDENTIFIER);
   if (!reference.capabilities || typeof reference.capabilities !== "object" || Array.isArray(reference.capabilities)
     || reference.capabilities.exact_live_route !== true || reference.capabilities.requires_live_binding !== true) {
     throw new BridgeError("out-of-process host must declare exact_live_route and requires_live_binding", "invalid_host_adapter_file", 400);
   }
-  if (!["accepted_to_live_pipe", "host_accepted"].includes(reference.receipt_upper_bound)) {
-    throw new BridgeError("out-of-process host receipt upper bound is unsupported", "invalid_host_adapter_file", 400);
+  const receiptUpperBound: unknown = reference.receipt_upper_bound;
+  if (typeof receiptUpperBound !== "string" || !RECEIPT_UPPER_BOUNDS.includes(receiptUpperBound)) {
+    // HTTP 202 only proves the host accepted the wake, so agent_completed is never offered here.
+    const problem = receiptUpperBound === undefined ? "is required"
+      : receiptUpperBound === "agent_completed" ? "cannot be agent_completed for an out-of-process host"
+        : "is unsupported";
+    throw new BridgeError(
+      `out-of-process host receipt_upper_bound ${problem}; use accepted_to_live_pipe or host_accepted`,
+      "invalid_host_adapter_file",
+      400,
+    );
   }
   const manifest: HostAdapterManifest = {
     contract_version: HOST_ADAPTER_CONTRACT_VERSION,
@@ -205,30 +228,30 @@ export function loadOutOfProcessHostFile(
   const ids = new Set<string>();
   const kinds = new Set<string>();
   const adapters: LocalHttpHostAdapter[] = [];
-  const credentials: HostBootstrapCredential[] = [];
+  const declarations: Array<{ reference: OutOfProcessHostReference; attention_channels: string[] }> = [];
   for (const reference of file.adapters) {
-    if (!reference || !IDENTIFIER.test(reference.id || "") || !TOKEN_ENV.test(reference.token_env || "")) {
-      throw new BridgeError("out-of-process host credential reference is invalid", "invalid_host_adapter_file", 400);
+    if (!reference || typeof reference !== "object" || Array.isArray(reference)) {
+      throw new BridgeError("out-of-process host adapters entries must be objects", "invalid_host_adapter_file", 400);
     }
+    requirePattern(reference.id, "id", IDENTIFIER);
+    requirePattern(reference.token_env, "token_env", TOKEN_ENV);
     if (ids.has(reference.id) || kinds.has(reference.adapter_kind)) {
       throw new BridgeError("out-of-process host ids and adapter kinds must be unique", "invalid_host_adapter_file", 400);
     }
     ids.add(reference.id);
     kinds.add(reference.adapter_kind);
+    const attentionChannels = boundedPrintable(reference.attention_channels, "attention_channels", true);
+    adapters.push(new LocalHttpHostAdapter(normalizedManifest(reference), { timeout_ms: reference.timeout_ms }));
+    declarations.push({ reference, attention_channels: attentionChannels });
+  }
+  // Tokens are checked only after the whole file is valid, so doctor reports file
+  // mistakes even before the daemon environment file has been loaded.
+  const credentials = declarations.map(({ reference, attention_channels }): HostBootstrapCredential => {
     const token = environment[reference.token_env];
     if (!token || token.length < MIN_SECRET_LENGTH) {
       throw new BridgeError(`host credential environment variable is missing or too short: ${reference.token_env}`, "host_credential_unavailable", 400);
     }
-    const attentionChannels = boundedPrintable(reference.attention_channels, "attention_channels", true);
-    const manifest = normalizedManifest(reference);
-    adapters.push(new LocalHttpHostAdapter(manifest, { timeout_ms: reference.timeout_ms }));
-    credentials.push({
-      id: reference.id,
-      token,
-      adapter_kind: reference.adapter_kind,
-      host_kind: reference.host_kind,
-      attention_channels: attentionChannels,
-    });
-  }
+    return { id: reference.id, token, adapter_kind: reference.adapter_kind, host_kind: reference.host_kind, attention_channels };
+  });
   return { adapters, credentials };
 }

@@ -57,8 +57,9 @@ wakebridge daemon \
 启动前可以用同一 env/file 运行 `wakebridge doctor --config ... --host-adapters ...`。Doctor 只输出 adapter kind/version、host kinds、
 experimental tier 与错误摘要，不打印 token；缺失 env、无效 capability 或重复 kind 会令 readiness fail。
 
-当前文件只允许 `experimental` out-of-process adapters。`receipt_upper_bound` 只能是 `accepted_to_live_pipe` 或
-`host_accepted`；HTTP 202 不能声明 `agent_completed`。每个 adapter kind 与 credential id 必须唯一。
+当前文件只允许 `experimental` out-of-process adapters。`receipt_upper_bound` 与 `tested_host_versions` 都是必填项：
+`receipt_upper_bound` 只能是 `accepted_to_live_pipe` 或 `host_accepted`，HTTP 202 不能声明 `agent_completed`；
+`tested_host_versions` 是 adapter 实测过的宿主版本字符串数组。每个 adapter kind 与 credential id 必须唯一。
 
 ## 2. 外部 service 生命周期
 

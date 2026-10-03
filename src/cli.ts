@@ -168,7 +168,7 @@ function help(): void {
       "service uninstall --config PATH [--launch-agents-dir DIRECTORY] [--systemd-user-dir DIRECTORY]",
       "daemon --config PATH --port 4311 [--host 127.0.0.1] [--source-credentials PATH] [--host-adapters PATH]",
       "daemon --unsafe-no-auth --host 127.0.0.1 (explicit development mode only)",
-      "doctor",
+      "doctor --config PATH [--host-adapters PATH] [--source-credentials PATH]",
       "connector-catalog (lists available/planned connectors; all default disabled)",
       "source-validate --connectors PATH",
       "source-once SOURCE --connectors PATH",
