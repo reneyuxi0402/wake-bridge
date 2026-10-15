@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,8 +11,10 @@ import {
   BotlingKnowsSourceAdapter,
   botlingKnowsCursorFromNow,
   type BotlingKnowsNotificationClient,
-  type BotlingKnowsNotificationPage,
+  type BotlingKnowsNotificationSummary,
+  BOTLING_KNOWS_DEFAULT_WAKE_TYPES,
 } from "../src/adapters/botlingknows.js";
+import { validatePolicyFile } from "../src/policy-control.js";
 import type { PullSourceAdapter, SourcePollContext } from "../src/types.js";
 
 function dbPath(): string {
@@ -186,96 +188,145 @@ describe("source adapter contract", () => {
 });
 
 describe("botlingknows connector-backed source", () => {
-  it("uses full + mark_read=false, separates page cursor from high-watermark, and maps no body", async () => {
-    const calls: Array<Record<string, unknown>> = [];
-    const pages: BotlingKnowsNotificationPage[] = [
-      {
-        notifications: [
-          { id: 5, notif_type: "new_reply", category: "direct", created_at: "2026-08-28T10:05:00Z", question_id: 12, content_id: 50, actor_id: 7, next_action: { tool: "get_content", content_id: 50 } },
-          { id: 4, notif_type: "liked", category: "activity", created_at: "2026-08-28T10:04:00Z", content_id: 40 },
-        ],
-        next_cursor: "page-2",
-      },
-      {
-        notifications: [
-          { id: 3, notif_type: "invited", category: "invitation", created_at: "2026-08-28T10:03:00Z", question_id: 12 },
-          { id: 2, notif_type: "new_answer", category: "direct", created_at: "2026-08-28T10:02:00Z", question_id: 11 },
-          { id: 1, notif_type: "system_notice", category: "system", created_at: "2026-08-28T10:01:00Z" },
-        ],
-      },
-      {
-        notifications: [
-          { id: 7, notif_type: "mention", category: "direct", created_at: "2026-08-28T10:07:00Z", content_id: 70 },
-          { id: 6, notif_type: "new_reply", category: "direct", created_at: "2026-08-28T10:06:00Z", content_id: 60 },
-          { id: 5, notif_type: "new_reply", category: "direct", created_at: "2026-08-28T10:05:00Z", content_id: 50 },
-        ],
-        next_cursor: "must-not-follow-after-watermark",
-      },
-    ];
-    const client: BotlingKnowsNotificationClient = {
-      notifications(input) {
-        calls.push(input);
-        const page = pages.shift();
-        if (!page) throw new Error("unexpected poll");
-        return page;
-      },
-    };
-    const b = bridge();
-    const runner = new SourceRunner(b);
-    const adapter = new BotlingKnowsSourceAdapter(client);
-    expect(adapter.manifest).toMatchObject({
-      credential_custody: "connector",
-      upstream_credential_breadth: "unknown",
-      connector_capabilities: ["notifications.read"],
-    });
-    await expect(runner.runOnce(adapter, { limit: 10 })).resolves.toMatchObject({ events_inserted: 2, has_more: true });
+  const marker = (id: number, created_at = "2026-10-15T01:00:00.000001Z") => ({ id, created_at });
+  const summary = (values: Record<string, [number, number | null]>): BotlingKnowsNotificationSummary => ({
+    unread_by_type: Object.fromEntries(Object.entries(values).map(([type, [count]]) => [type, count])),
+    latest_unread_by_type: Object.fromEntries(Object.entries(values).map(([type, [, id]]) => [type, id === null ? null : marker(id)])),
+  });
+
+  it("detects equal-count arrivals and never lowers per-type watermarks across read, withdrawal or restart", async () => {
+    const calls: unknown[] = [];
+    let current = summary({ new_reply: [3, 101], liked: [8, 100] });
+    const client: BotlingKnowsNotificationClient = { notifications(input) { calls.push(input); return current; } };
+    const path = dbPath();
+    let b = bridge(path);
+    let runner = new SourceRunner(b);
+    let adapter = new BotlingKnowsSourceAdapter(client);
+    await expect(runner.runOnce(adapter)).resolves.toMatchObject({ events_inserted: 2 });
+    await expect(runner.runOnce(adapter)).resolves.toMatchObject({ events_inserted: 0 });
+    current = summary({ new_reply: [3, 102], liked: [8, 100] });
+    await expect(runner.runOnce(adapter)).resolves.toMatchObject({ events_inserted: 1 });
+    current = summary({ new_reply: [2, 98], liked: [0, null] });
+    await expect(runner.runOnce(adapter)).resolves.toMatchObject({ events_inserted: 0 });
+    current = summary({ new_reply: [0, null], liked: [0, null] });
+    await runner.runOnce(adapter);
     expect(runner.checkpoints.get("botlingknows")?.cursor).toEqual({
-      v: 1, high_watermark: 0, page_cursor: "page-2", pending_max_id: 5,
+      v: 2, high_watermarks: { new_reply: marker(102), liked: marker(100) },
     });
-    await expect(runner.runOnce(adapter, { limit: 10 })).resolves.toMatchObject({ events_inserted: 3, has_more: false });
-    expect(runner.checkpoints.get("botlingknows")?.cursor).toEqual({
-      v: 1, high_watermark: 5, page_cursor: null, pending_max_id: 5,
+    b.close();
+    b = bridge(path);
+    runner = new SourceRunner(b);
+    adapter = new BotlingKnowsSourceAdapter(client);
+    current = summary({ new_reply: [1, 102], liked: [1, 103] });
+    await expect(runner.runOnce(adapter)).resolves.toMatchObject({ events_inserted: 1 });
+    const event = b.listEvents({ source: "botlingknows" }).find((e) => e.dedupe_key === "notification:2026-10-15T01:00:00.000001Z:102");
+    expect(event).toMatchObject({
+      type: "new_reply", resource: { uri: "botlingknows://notifications", cursor: "2026-10-15T01:00:00.000001Z:102" },
+      metadata: { unread_count: 3, latest_unread: marker(102), default_wake: true,
+        next_action: { action: "notifications", payload: { mode: "list" } } },
     });
-    await expect(runner.runOnce(adapter, { limit: 10 })).resolves.toMatchObject({ events_inserted: 2, has_more: false });
-    expect(runner.checkpoints.get("botlingknows")?.cursor).toEqual({
-      v: 1, high_watermark: 7, page_cursor: null, pending_max_id: 7,
-    });
-    expect(calls).toEqual([
-      { view: "full", mark_read: false, limit: 10 },
-      { view: "full", mark_read: false, limit: 10, cursor: "page-2" },
-      { view: "full", mark_read: false, limit: 10 },
-    ]);
-    expect(b.listEvents({ source: "botlingknows", limit: 20 }).map((event) => Number(event.resource.cursor))).toEqual([4, 5, 1, 2, 3, 6, 7]);
-    const direct = b.listEvents({ source: "botlingknows", limit: 20 }).find((event) => event.dedupe_key === "notification:5");
-    expect(direct).toMatchObject({
-      type: "new_reply",
-      priority_hint: "high",
-      attention_channel_hint: "life",
-      actor_ref: "botlingknows:principal:7",
-      resource: { uri: "botlingknows://content/50", cursor: 5 },
-      metadata: { notification_id: 5, category: "direct", notif_type: "new_reply", question_id: 12, content_id: 50 },
-    });
-    expect(JSON.stringify(direct)).not.toContain("summary");
-    expect(JSON.stringify(direct)).not.toContain("body");
+    expect(calls.every((call) => JSON.stringify(call) === '{"mode":"summary"}')).toBe(true);
     b.close();
   });
 
-  it("offers an explicit from-now bootstrap without marking notifications read", async () => {
-    const calls: Array<Record<string, unknown>> = [];
-    const client: BotlingKnowsNotificationClient = {
-      notifications(input) {
-        calls.push(input);
-        return {
-          notifications: [
-            { id: 22, notif_type: "new_reply", category: "direct", created_at: "2026-08-28T10:22:00Z" },
-            { id: 21, notif_type: "liked", category: "activity", created_at: "2026-08-28T10:21:00Z" },
-          ],
-        };
-      },
-    };
-    await expect(botlingKnowsCursorFromNow(client, 20)).resolves.toEqual({
-      v: 1, high_watermark: 22, page_cursor: null, pending_max_id: 22,
+  it("keeps pending types eligible under a small Bridge limit and replays deterministically", async () => {
+    const adapter = new BotlingKnowsSourceAdapter({ notifications: () => summary({
+      new_reply: [1, 8], mention: [1, 10], invite_family: [2, 9],
+    }) });
+    const first = await adapter.poll({ cursor: null, limit: 1 });
+    expect(first.events.map((e) => e.type)).toEqual(["new_reply"]);
+    expect(first.has_more).toBe(true);
+    const replay = await adapter.poll({ cursor: null, limit: 1 });
+    expect(replay).toEqual(first);
+    const second = await adapter.poll({ cursor: first.next_cursor, limit: 1 });
+    expect(second.events.map((e) => e.type)).toEqual(["invite_family"]);
+    const last = await adapter.poll({ cursor: second.next_cursor, limit: 1 });
+    expect(last.events.map((e) => e.type)).toEqual(["mention"]);
+    expect(last.has_more).toBe(false);
+  });
+
+  it("fails closed on ID-only checkpoints without overwriting the old baseline", async () => {
+    const b = bridge();
+    const runner = new SourceRunner(b);
+    let polls = 0;
+    const adapter = new BotlingKnowsSourceAdapter({ notifications: () => {
+      polls++; return summary({ new_reply: [1, 9] });
+    } });
+    const previous = runner.checkpoints.commit({ ...adapter.manifest, version: "0.1.0" },
+      { v: 1, high_watermark: 7, page_cursor: "page-2", pending_max_id: 9 }, 0);
+    await expect(runner.runOnce(adapter)).rejects.toMatchObject({ code: "invalid_source_cursor" });
+    expect(polls).toBe(0);
+    expect(runner.checkpoints.get("botlingknows")).toEqual(previous);
+    b.close();
+  });
+
+  it("uses microsecond timestamps ahead of IDs for both watermark and durable dedupe", async () => {
+    const b = bridge();
+    const runner = new SourceRunner(b);
+    let current = summary({ new_reply: [1, 101] });
+    const adapter = new BotlingKnowsSourceAdapter({ notifications: () => current });
+    await runner.runOnce(adapter);
+    current.latest_unread_by_type.new_reply = marker(101, "2026-10-15T01:00:00.000002Z");
+    await expect(runner.runOnce(adapter)).resolves.toMatchObject({ events_inserted: 1 });
+    current.latest_unread_by_type.new_reply = marker(1, "2026-10-15T01:00:00.000003Z");
+    await expect(runner.runOnce(adapter)).resolves.toMatchObject({ events_inserted: 1 });
+    await expect(runner.runOnce(adapter)).resolves.toMatchObject({ events_inserted: 0 });
+    current.latest_unread_by_type.new_reply = marker(999, "2026-10-15T01:00:00.000002Z");
+    await expect(runner.runOnce(adapter)).resolves.toMatchObject({ events_inserted: 0 });
+    expect(new Set(b.listEvents().map((e) => e.dedupe_key)).size).toBe(3);
+    expect(runner.checkpoints.get("botlingknows")?.cursor).toEqual({
+      v: 2, high_watermarks: { new_reply: marker(1, "2026-10-15T01:00:00.000003Z") },
     });
-    expect(calls).toEqual([{ view: "full", mark_read: false, limit: 20 }]);
+    b.close();
+  });
+
+  it("bootstraps from-now using only the non-consuming summary", async () => {
+    const calls: unknown[] = [];
+    const client: BotlingKnowsNotificationClient = { notifications(input) {
+      calls.push(input); return summary({ new_reply: [2, 22], liked: [0, null] });
+    } };
+    const cursor = await botlingKnowsCursorFromNow(client);
+    expect(cursor).toEqual({ v: 2, high_watermarks: { new_reply: marker(22) } });
+    expect((await new BotlingKnowsSourceAdapter(client).poll({ cursor, limit: 20 })).events).toEqual([]);
+    expect(calls).toEqual([{ mode: "summary" }, { mode: "summary" }]);
+  });
+
+  it.each([
+    { unread_by_type: { mention: 1 } },
+    { unread_by_type: { mention: 1 }, latest_unread_by_type: { mention: null } },
+    { unread_by_type: { mention: 0 }, latest_unread_by_type: { mention: 4 } },
+    { unread_by_type: { mention: -1 }, latest_unread_by_type: { mention: 4 } },
+    { unread_by_type: { mention: 1 }, latest_unread_by_type: { mention: "4" } },
+    { unread_by_type: { mention: 1 }, latest_unread_by_type: { mention: marker(4, "2026-10-15T01:00:00.000Z") } },
+  ])("does not advance checkpoints for unsupported or malformed summaries %j", async (value) => {
+    const b = bridge();
+    const runner = new SourceRunner(b);
+    const adapter = new BotlingKnowsSourceAdapter({ notifications: () => value as any });
+    await expect(runner.runOnce(adapter)).rejects.toMatchObject({ code: "invalid_source_page" });
+    expect(runner.checkpoints.get("botlingknows")).toBeNull();
+    b.close();
+  });
+
+  it("recommends immediate content, mention and human-invite delivery while allowing personal type overrides", async () => {
+    const b = bridge();
+    const recipe = validatePolicyFile(JSON.parse(readFileSync(
+      new URL("../examples/policies/botlingknows-conservative.json", import.meta.url), "utf8",
+    ))).policies;
+    const types = [...BOTLING_KNOWS_DEFAULT_WAKE_TYPES, "liked", "useful", "invite_system", "affair_progress", "future_type"];
+    const adapter = new BotlingKnowsSourceAdapter({ notifications: () => summary(
+      Object.fromEntries(types.map((type, index) => [type, [1, index + 1]])),
+    ) });
+    const { events } = await adapter.poll({ cursor: null, limit: 100 });
+    for (const event of events) {
+      const immediate = BOTLING_KNOWS_DEFAULT_WAKE_TYPES.has(event.type);
+      const preview = b.previewPolicy("botlingknows", event, recipe);
+      expect(preview.suppressed).toBe(!immediate);
+      expect(preview.matched_policy?.delivery.mode).toBe(immediate ? "immediate" : "suppress");
+    }
+    const personal = [...recipe, { id: "my-system-invites", version: 1, order: 200,
+      match: { source: "botlingknows", type: "invite_system" }, delivery: { mode: "immediate" as const } }];
+    const systemInvite = events.find((e) => e.type === "invite_system")!;
+    expect(b.previewPolicy("botlingknows", systemInvite, personal).suppressed).toBe(false);
+    b.close();
   });
 });

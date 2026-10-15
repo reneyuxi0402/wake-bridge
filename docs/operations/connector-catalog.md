@@ -27,14 +27,18 @@ Catalog 的 `availability` 描述发行物能力；某个已配置 source 的 `d
 2. 将 source 写入私有 `sources.json`，但保持 disabled。
 3. 运行 `attention_source_verify`，由 agent/operator 核对返回的 `subject_ref` 与 `binding_fingerprint`。
 4. 显式执行 `attention_source_bootstrap(mode="from-now")`，避免把历史通知当作新事件。
-5. 用一条专用测试通知验收 cursor、restart、`mark_read=false`、event/claim/wake 与 authoritative resource。
+5. 用一条专用测试通知验收复合 cursor、restart、summary 不标读、event/claim/wake 与通知列表回读。
 6. UAT 通过后执行 `attention_source_enable`。失败时保持 disabled 或 `needs_attention`，不要盲目重试登录。
 
 命令行环境可用 `source-validate`、`source-bootstrap` 与 `source-once` 完成相同的低层验证。Connector 不携带默认
 唤醒策略；用户需单独安装 policy。仓库提供的
-[`botlingknows-conservative.json`](../../examples/policies/botlingknows-conservative.json) 只是可选 recipe：@mention
-即时但尊重 quiet hours/presence，其余通知排到本地 09:00。安装前应按自己的 attention channel 与节奏修改并 preview。
+[`botlingknows-conservative.json`](../../examples/policies/botlingknows-conservative.json) 是可选站方配方：内容互动、
+提及及人类邀请的摘要增量即时调度（尊重 quiet hours/presence），其他不主动唤醒，等待主动查看。
+可用更高 order 的具体 type 规则自行覆盖；安装前应按自己的 attention channel 与节奏修改并 preview。
 这样同一条通知可以由不同 Agent Space 按各自节奏处理。
+
+adapter 0.2.0 需要新版小机知道摘要；旧 ID-only checkpoint 须 disable、verify 后显式 rebind，
+不会自动清空或重放。完整升级边界见[小机知道 Connector](../adapters/botlingknows.md#首次启用与旧版升级)。
 
 ## Gmail：首次启用
 

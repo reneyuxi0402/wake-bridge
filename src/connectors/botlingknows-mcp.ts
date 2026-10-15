@@ -4,10 +4,9 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { BridgeError } from "../core.js";
 import {
   BotlingKnowsSourceAdapter,
-  BOTLING_KNOWS_MAX_PAGE_SIZE,
   botlingKnowsCursorFromNow,
   type BotlingKnowsNotificationClient,
-  type BotlingKnowsNotificationPage,
+  type BotlingKnowsNotificationSummary,
 } from "../adapters/botlingknows.js";
 import type { SourcePollContext } from "../types.js";
 import { StreamableHttpMcpClient } from "./mcp-http-client.js";
@@ -56,24 +55,16 @@ function secretEqual(actual: string, expected: string): boolean {
 class BotlingKnowsMcpNotificationClient implements BotlingKnowsNotificationClient {
   constructor(private readonly mcp: StreamableHttpMcpClient) {}
 
-  async notifications(input: {
-    view: "full";
-    mark_read: false;
-    limit: number;
-    cursor?: string;
-  }): Promise<BotlingKnowsNotificationPage> {
+  async notifications(input: { mode: "summary" }): Promise<BotlingKnowsNotificationSummary> {
     const envelope = await this.mcp.callTool("botling_knows", {
       action: "notifications",
       payload: input,
       idempotency_key: "",
     });
-    if (envelope.ok !== true || !envelope.data || !Array.isArray(envelope.data.notifications)) {
+    if (envelope.ok !== true || !envelope.data?.summary) {
       throw new BridgeError("botlingknows MCP returned an error envelope", "botlingknows_mcp_error", 424);
     }
-    return {
-      notifications: envelope.data.notifications,
-      next_cursor: envelope.meta?.next_cursor ?? null,
-    };
+    return envelope.data.summary;
   }
 }
 
@@ -114,7 +105,7 @@ export async function startBotlingKnowsConnector(options: BotlingKnowsConnectorO
       if (request.method === "POST" && path === "/v1/poll") {
         const body = await readJson(request);
         const limit = Number(body.limit);
-        if (!Number.isSafeInteger(limit) || limit < 1 || limit > BOTLING_KNOWS_MAX_PAGE_SIZE || !("cursor" in body)) {
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000 || !("cursor" in body)) {
           throw new BridgeError("poll context is invalid", "invalid_source_poll", 400);
         }
         jsonResponse(response, 200, await adapter.poll({ cursor: body.cursor, limit } as SourcePollContext));

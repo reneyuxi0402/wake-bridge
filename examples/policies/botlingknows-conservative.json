@@ -3,10 +3,10 @@
   "policies": [
     {
       "id": "botlingknows-mention",
-      "version": 1,
+      "version": 2,
       "enabled": true,
       "order": 100,
-      "match": { "source": "botlingknows", "type": "mention" },
+      "match": { "source": "botlingknows", "metadata": { "default_wake": true } },
       "delivery": {
         "mode": "immediate",
         "quiet_hours_policy": "defer",
@@ -14,23 +14,20 @@
       },
       "batch": { "coalesce_by": "source", "max_events": 20, "window_ms": 30000 },
       "target": { "attention_channel": "life" },
-      "reason_code": "botlingknows_mention"
+      "reason_code": "botlingknows_direct_interaction"
     },
     {
       "id": "botlingknows-other",
-      "version": 1,
+      "version": 2,
       "enabled": true,
       "order": 50,
       "match": { "source": "botlingknows" },
       "delivery": {
-        "mode": "scheduled",
-        "scheduled_local_time": "09:00",
-        "quiet_hours_policy": "defer",
-        "foreground_presence_policy": "defer"
+        "mode": "suppress"
       },
       "batch": { "coalesce_by": "source", "max_events": 50, "window_ms": 60000 },
       "target": { "attention_channel": "life" },
-      "reason_code": "botlingknows_daily"
+      "reason_code": "botlingknows_wait_for_voluntary_read"
     },
     {
       "id": "default",
