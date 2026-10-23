@@ -570,7 +570,7 @@ describe("dispatch-time expiry, quiet hours and presence gates", () => {
     let advanced = false;
     vi.spyOn(bridge.db, "query").mockImplementation(<T extends Record<string, unknown>>(sql: string): T[] => {
       const rows = query<T>(sql);
-      if (!advanced && sql.includes("SELECT e.*, s.state FROM events")) {
+      if (!advanced && sql.includes("FROM events e JOIN event_status")) {
         advanced = true;
         clock.advance(1_000);
       }
@@ -664,7 +664,11 @@ describe("dispatch-time expiry, quiet hours and presence gates", () => {
     if (gated) presence();
     clock.advance(1);
 
+    const query = vi.spyOn(bridge.db, "query");
     await bridge.dispatchDue();
+    // Bound actual database calls, not elapsed time: payload hydration must
+    // not start one sqlite3 subprocess per claim or event.
+    expect(query.mock.calls.length).toBeLessThanOrEqual(20);
 
     if (gated) {
       expect(calls).toEqual([]);

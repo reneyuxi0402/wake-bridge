@@ -1694,14 +1694,19 @@ export class WakeBridge {
     // directly rather than through a bounded event index: an older event must
     // not disappear from a wake payload merely because the instance has more
     // than 1,000 retained events.
-    const claims = batch.claim_ids.map((claimId) => this.getClaim(claimId)).filter((claim): claim is AttentionClaim => Boolean(claim) && claim!.state === "batched");
-    const events = new Map<string, WakeEvent>();
-    for (const claim of claims) {
-      for (const eventId of claim.event_ids) {
-        const event = this.getEvent(eventId);
-        if (event) events.set(event.id, event);
-      }
-    }
+    // Each database call starts sqlite3. Hydrate the exact sets in two reads,
+    // then restore batch order (including repeated claim references) in memory.
+    const claimsById = new Map(this.db.query<DbRow>(`SELECT * FROM claims
+      WHERE instance_id=${sqlValue(this.config.instance_id)} AND id IN (SELECT value FROM json_each(${sqlJson(batch.claim_ids)}));`)
+      .map((row) => { const claim = this.claimFromRow(row); return [claim.id, claim] as const; }));
+    const claims = batch.claim_ids.map((claimId) => claimsById.get(claimId))
+      .filter((claim): claim is AttentionClaim => Boolean(claim) && claim!.state === "batched");
+    const eventIds = arrayWithoutDuplicates(claims.flatMap((claim) => claim.event_ids));
+    // Payload refs need no metadata or previews; do not accumulate those large
+    // columns in one sqlite3 JSON response when hydrating a full batch.
+    const events = new Map(this.db.query<Pick<WakeEvent, "id" | "source" | "type">>(`SELECT e.id, e.source, e.type FROM events e JOIN event_status s ON s.event_id=e.id
+      WHERE e.instance_id=${sqlValue(this.config.instance_id)} AND e.id IN (SELECT value FROM json_each(${sqlJson(eventIds)}));`)
+      .map((event) => [event.id, event] as const));
     return {
       schema_version: 1,
       instance_id: this.config.instance_id,

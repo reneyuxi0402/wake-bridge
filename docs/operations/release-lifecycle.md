@@ -46,12 +46,18 @@ npm install --global wake-bridge
 
 公开版本由 GitHub tag 驱动的 release workflow 发布。发布前必须同时提交版本号与
 `docs/releases/<version>.md`，并确保 tag 精确等于 `v<version>`。推送 tag 后，workflow 会在
-GitHub-hosted runner 上重新执行 typecheck、全量测试与 `npm pack`，通过 npm Trusted Publishing/OIDC
-把同一个 tarball 发布到 `latest`，随后创建带 tarball 和 SHA-256 清单的 GitHub pre-release。
+同一 tag commit 上调用 `.github/workflows/ci.yml`，在 macOS / Ubuntu 24.04 × Node 20 / 24 四组 runner 上
+重新执行 typecheck 与全量测试。四组全部成功后，才运行打包与发布 job：`npm pack` 后通过 npm Trusted Publishing/OIDC
+把同一个 tarball 发布到 `latest`，随后创建带 tarball 和 SHA-256 清单的 GitHub pre-release。任一验证失败或取消都会阻止发布，
+不依赖另一次 main CI 的完成时序。测试 job 只有 contents read 权限，发布 job 才持有 release 写权限与 OIDC。
+
+此门禁为 preview.18 发布后的修复；已发布的 preview.18 使用旧流程，不改写其 tag 或 tarball。
+确认 package.json 已更新为下一未发布版本，且对应说明与代码均已提交，再执行：
 
 ```bash
-git tag v0.9.0-preview.18
-git push origin v0.9.0-preview.18
+release_tag="v$(node -p 'require("./package.json").version')"
+git tag "$release_tag"
+git push origin "$release_tag"
 ```
 
 打 tag 之前，先把仍写着上一个版本号的“当前版本”标注一并更新（README、quickstart、protocol、architecture、public SDK、

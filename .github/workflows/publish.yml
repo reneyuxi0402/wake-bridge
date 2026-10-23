@@ -10,13 +10,20 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
+  verify:
+    name: Release compatibility
+    uses: ./.github/workflows/ci.yml
+
   publish:
     name: npm and GitHub release
+    needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v7
@@ -53,12 +60,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Test
-        run: npm test
 
       - name: Pack the release artifact
         id: pack
