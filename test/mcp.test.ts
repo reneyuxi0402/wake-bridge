@@ -61,6 +61,14 @@ describe("Wake Bridge stdio MCP", () => {
       "attention_source_disable",
     ]);
     expect(names).not.toContain("attention_wait");
+    for (const name of ["attention_watch_status", "attention_watch_configure"]) {
+      const description = (listed?.result as any).tools.find((tool: any) => tool.name === name).description;
+      expect(description).toContain("enabled does not mean armed");
+      expect(description).toContain("waiting_for_activity requires trusted independent activity from the current binding generation");
+      expect(description).toContain("binding alone is not a baseline");
+      expect(description).toContain("Wake activity cannot arm the watch");
+      expect(description).toContain("not startup-liveness or endpoint-disconnection monitoring");
+    }
     expect(await server.handleRequest({ jsonrpc: "2.0", method: "notifications/initialized" })).toBeNull();
     b.close();
   });

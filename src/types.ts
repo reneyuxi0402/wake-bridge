@@ -300,6 +300,7 @@ export interface BridgeConfig {
   ack_timeout_ms?: number;
   /** Optional channel for deduplicated Wake Bridge operator incidents. */
   incident_attention_channel?: string;
+  /** Retry backoff base (default 5s); doubles per cumulative attempt up to max(base, 5m). Zero retries immediately. */
   retry_delay_ms?: number;
   batch_window_ms?: number;
   default_policy?: PolicyRule;

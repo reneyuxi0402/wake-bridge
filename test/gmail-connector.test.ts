@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   GmailSourceAdapter,
   type GmailHistoryPage,
@@ -11,7 +11,7 @@ import {
   type GmailProfile,
 } from "../src/adapters/gmail.js";
 import { BridgeError, WakeBridge } from "../src/core.js";
-import { startGmailConnector } from "../src/connectors/gmail-http.js";
+import { GmailRestClient, startGmailConnector } from "../src/connectors/gmail-http.js";
 import { bootstrapSourceConnector, SourceSupervisor } from "../src/source-connector.js";
 
 function credentialDirectory(options: { mode?: number; tokenUri?: string; scopes?: string[] } = {}): string {
@@ -67,6 +67,97 @@ class PagedGmailClient implements GmailNotificationClient {
 }
 
 describe("Gmail Source Connector", () => {
+  it("bounds metadata scans even when every candidate is filtered or deleted", async () => {
+    const client = new PagedGmailClient();
+    const reads: string[] = [];
+    client.messageMetadata = (id) => {
+      reads.push(id);
+      if (id === "m2") throw new BridgeError("gone", "gmail_message_not_found", 404);
+      return { id, labelIds: id === "m1" ? ["DRAFT", "INBOX"] : [] };
+    };
+    const adapter = new GmailSourceAdapter(client, {
+      subject_ref: "gmail:account:owner@example.com", binding_fingerprint: `sha256:${"1".repeat(64)}`,
+      upstream_credential_scopes: [], upstream_credential_breadth: "unknown",
+    });
+    const first = await adapter.poll({ cursor: { v: 1, history_id: "90", page_token: null, message_offset: 0 }, limit: 2 });
+    expect(reads).toEqual(["m1", "m2"]);
+    expect(first).toMatchObject({ events: [], next_cursor: { history_id: "90", page_token: null, message_offset: 2 }, has_more: true });
+    const second = await adapter.poll({ cursor: first.next_cursor, limit: 2 });
+    expect(reads).toEqual(["m1", "m2", "m3"]);
+    expect(second.next_cursor).toEqual({ v: 1, history_id: "90", page_token: "page-2", message_offset: 0 });
+  });
+
+  it("checkpoints completed metadata work before the poll deadline and retries the interrupted message", async () => {
+    let controller = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    const reads: string[] = [];
+    let interrupt = true;
+    const client = new GmailRestClient(credentialDirectory(), async (input, init) => {
+      const url = String(input);
+      expect(init?.signal).toBe(controller.signal);
+      if (url.includes("oauth2")) return Response.json({ access_token: "fixture", expires_in: 3600 });
+      if (url.includes("/history?")) return Response.json(new PagedGmailClient().history({ start_history_id: "90", page_token: null }));
+      const id = /messages\/(m\d)/u.exec(url)![1];
+      reads.push(id);
+      if (id === "m2" && interrupt) {
+        controller.abort(new DOMException("deadline", "TimeoutError"));
+        throw controller.signal.reason;
+      }
+      return Response.json({ id, labelIds: ["INBOX"] });
+    });
+    const adapter = new GmailSourceAdapter(client, {
+      subject_ref: "gmail:account:owner@example.com", binding_fingerprint: `sha256:${"1".repeat(64)}`,
+      upstream_credential_scopes: [], upstream_credential_breadth: "unknown",
+    });
+    try {
+      const first = await adapter.poll({ cursor: { v: 1, history_id: "90", page_token: null, message_offset: 0 }, limit: 3 });
+      expect(first.events.map((event) => event.metadata?.message_id)).toEqual(["m1"]);
+      expect(first.next_cursor).toEqual({ v: 1, history_id: "90", page_token: null, message_offset: 1 });
+      expect(first.has_more).toBe(true);
+      expect(timeout).toHaveBeenCalledWith(10_000);
+      // A fresh call has a fresh deadline and resumes the same unprocessed item.
+      interrupt = false;
+      controller = new AbortController();
+      timeout.mockReturnValue(controller.signal);
+      const second = await adapter.poll({ cursor: first.next_cursor, limit: 3 });
+      expect(second.events.map((event) => event.metadata?.message_id)).toEqual(["m2", "m3"]);
+      expect(reads).toEqual(["m1", "m2", "m2", "m3"]);
+    } finally { timeout.mockRestore(); }
+  });
+
+  it.each(["deadline", "provider failure"])("does not claim cursor progress when the first metadata read fails: %s", async (failure) => {
+    const controller = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    const client = new PagedGmailClient();
+    client.messageMetadata = () => {
+      if (failure === "deadline") controller.abort();
+      throw new BridgeError(failure, "gmail_unavailable", 503);
+    };
+    const adapter = new GmailSourceAdapter(client, {
+      subject_ref: "gmail:account:owner@example.com", binding_fingerprint: `sha256:${"1".repeat(64)}`,
+      upstream_credential_scopes: [], upstream_credential_breadth: "unknown",
+    });
+    try {
+      await expect(adapter.poll({ cursor: { v: 1, history_id: "90", page_token: null, message_offset: 0 }, limit: 3 }))
+        .rejects.toMatchObject({ code: "gmail_unavailable" });
+    } finally { timeout.mockRestore(); }
+  });
+
+  it.each(["history", "metadata"])("keeps %s response-body deadline failures retryable", async (stage) => {
+    const client = new GmailRestClient(credentialDirectory(), async (input, init) => {
+      if (String(input).includes("oauth2")) return Response.json({ access_token: "fixture", expires_in: 3600 });
+      return new Response(new ReadableStream({ start(controller) {
+        const signal = init!.signal!;
+        if (signal.aborted) controller.error(signal.reason);
+        else signal.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+      } }));
+    });
+    const signal = AbortSignal.timeout(25);
+    await expect(stage === "history"
+      ? client.history({ start_history_id: "90", page_token: null, max_results: 100 }, signal)
+      : client.messageMetadata("m1", signal)).rejects.toMatchObject({ code: "gmail_unavailable", status: 503 });
+  });
+
   it("keeps Gmail page tokens separate from the durable history waterline and never drops an expanded page", async () => {
     const client = new PagedGmailClient();
     const adapter = new GmailSourceAdapter(client, {

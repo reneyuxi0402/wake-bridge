@@ -23,7 +23,9 @@ import {
   uninstallService,
   upgradeInstance,
 } from "./release-lifecycle.js";
-import type { BridgeConfig } from "./types.js";
+import { BATCH_STATES, CLAIM_STATES } from "./types.js";
+import type { BatchState, BridgeConfig, ClaimState, EventState } from "./types.js";
+import { ABSOLUTE_RFC3339 } from "./validation.js";
 
 type Args = Record<string, string | boolean>;
 
@@ -35,10 +37,64 @@ const KNOWN_COMMANDS = new Set([
   "dispatch", "inspect", "status", "batch-retry", "prune", "events", "claims", "batches", "receipts", "bindings", "endpoints",
 ]);
 
+const BOOLEAN_OPTIONS = new Set(["help", "apply", "confirm_offline", "unsafe_no_auth"]);
+const BRIDGE_OPTIONS = "config db instance_id owner_id timezone admin_token";
+// Keep each command's public arguments next to one another. Options not used by
+// that command must fail before config loading or opening an Agent Space.
+const COMMAND_OPTIONS: Record<string, string> = {
+  init: "config db data_dir instance_id owner_id timezone admin_token",
+  "owner-token-rotate": "config",
+  "release-preflight": "config",
+  backup: "config output",
+  upgrade: "config backup_output confirm_offline",
+  restore: "config backup rollback_output confirm_instance_id confirm_offline",
+  "service install": "config port launch_agents_dir logs_dir systemd_user_dir environment_file host_adapters connectors source_credentials",
+  "service uninstall": "config launch_agents_dir systemd_user_dir",
+  doctor: `${BRIDGE_OPTIONS} host_adapters source_credentials`,
+  "connector-catalog": "",
+  "source-validate": `${BRIDGE_OPTIONS} connectors`,
+  "botlingknows-connector": `${BRIDGE_OPTIONS} host port upstream_url connector_token`,
+  "gmail-connector": `${BRIDGE_OPTIONS} host port credentials_dir connector_token`,
+  "group-chat-connector": `${BRIDGE_OPTIONS} host port upstream_url upstream_token connector_token`,
+  daemon: `${BRIDGE_OPTIONS} host port scheduler_interval_ms unsafe_no_auth connectors source_credentials host_adapters`,
+  mcp: BRIDGE_OPTIONS,
+  "source-bootstrap": `${BRIDGE_OPTIONS} connectors mode expected_subject_ref expected_binding_fingerprint`,
+  "source-once": `${BRIDGE_OPTIONS} connectors`,
+  "policy list": BRIDGE_OPTIONS,
+  "policy install": `${BRIDGE_OPTIONS} file`,
+  "policy test": `${BRIDGE_OPTIONS} source event file`,
+  "policy preview": `${BRIDGE_OPTIONS} source event file`,
+  emit: `${BRIDGE_OPTIONS} source type dedupe_key resource metadata event occurred_at coalesce_key priority_hint attention_channel_hint payload_preview`,
+  "claim-schedule": `${BRIDGE_OPTIONS} resource eligible_after attention_channel reason_code note idempotency_key`,
+  "claim-snooze": `${BRIDGE_OPTIONS} until`,
+  "claim-dismiss": `${BRIDGE_OPTIONS} reason`,
+  "claim-consume": `${BRIDGE_OPTIONS} result`,
+  "endpoint-register": `${BRIDGE_OPTIONS} host_kind session_ref id capabilities routes cold_routes`,
+  "endpoint-renew": `${BRIDGE_OPTIONS} lease_token lease_ms`,
+  takeover: `${BRIDGE_OPTIONS} attention_channel endpoint_id expected_generation`,
+  "presence-renew": `${BRIDGE_OPTIONS} attention_channel endpoint_id generation lease_token ttl_ms observed_by observation`,
+  tick: BRIDGE_OPTIONS,
+  dispatch: BRIDGE_OPTIONS,
+  inspect: BRIDGE_OPTIONS,
+  status: BRIDGE_OPTIONS,
+  "batch-retry": `${BRIDGE_OPTIONS} expected_attempt reason`,
+  prune: `${BRIDGE_OPTIONS} older_than_days apply`,
+  events: `${BRIDGE_OPTIONS} state source after limit`,
+  claims: `${BRIDGE_OPTIONS} state states channel source limit`,
+  batches: `${BRIDGE_OPTIONS} state states channel limit`,
+  receipts: `${BRIDGE_OPTIONS} limit`,
+  bindings: BRIDGE_OPTIONS,
+  endpoints: BRIDGE_OPTIONS,
+};
+const REQUIRED_POSITIONAL = new Set([
+  "source-bootstrap", "source-once", "claim-snooze", "claim-dismiss", "claim-consume", "endpoint-renew", "batch-retry",
+]);
+const EVENT_STATES: EventState[] = ["received", "matched", "suppressed", "batched", "consumed", "expired"];
+
 function parseArgs(values: string[]): { command: string; rest: string[]; options: Args } {
   const command = values[0] || "help";
   const rest: string[] = [];
-  const options: Args = {};
+  const options: Args = Object.create(null);
   for (let index = 1; index < values.length; index += 1) {
     const value = values[index];
     if (value === "--") {
@@ -50,8 +106,9 @@ function parseArgs(values: string[]): { command: string; rest: string[]; options
       continue;
     }
     const key = value.slice(2).replaceAll("-", "_");
+    if (Object.prototype.hasOwnProperty.call(options, key)) throw new Error(`duplicate option: ${value}`);
     const next = values[index + 1];
-    if (next && !next.startsWith("--")) {
+    if (!BOOLEAN_OPTIONS.has(key) && next !== undefined && !next.startsWith("--")) {
       options[key] = next;
       index += 1;
     } else {
@@ -59,6 +116,47 @@ function parseArgs(values: string[]): { command: string; rest: string[]; options
     }
   }
   return { command, rest, options };
+}
+
+function validateArgs({ command, rest, options }: ReturnType<typeof parseArgs>): void {
+  const hasAction = command === "policy" || command === "service";
+  const name = hasAction ? `${command} ${rest[0] ?? ""}` : command;
+  if (!Object.prototype.hasOwnProperty.call(COMMAND_OPTIONS, name)) {
+    throw new Error(command === "policy" ? "policy requires one of: list, install, test, preview" : "service requires install or uninstall");
+  }
+  const expectedPositionals = hasAction || REQUIRED_POSITIONAL.has(command) ? 1 : 0;
+  if (rest.length > expectedPositionals && !(command === "receipts" && rest.length === 1)) {
+    throw new Error(`unexpected positional argument for ${name}: ${rest[expectedPositionals]}`);
+  }
+  if (REQUIRED_POSITIONAL.has(command) && (rest.length !== 1 || !rest[0])) {
+    throw new Error(`${command} requires an explicit ${command.startsWith("source-") ? "SOURCE" : "ID"}`);
+  }
+  const allowed = new Set(COMMAND_OPTIONS[name].split(" "));
+  for (const [key, value] of Object.entries(options)) {
+    const flag = `--${key.replaceAll("_", "-")}`;
+    if (!allowed.has(key)) throw new Error(`unknown option for ${name}: ${flag}`);
+    if (!BOOLEAN_OPTIONS.has(key) && (typeof value !== "string" || value.length === 0)) {
+      throw new Error(`${flag} requires a value`);
+    }
+  }
+  if (options.cold_routes !== undefined) throw new Error("--cold-routes has been removed; use --routes");
+  if (options.limit !== undefined) {
+    const limit = Number(options.limit);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100_000) {
+      throw new Error("--limit must be an integer between 1 and 100000");
+    }
+  }
+  if (options.state !== undefined || options.states !== undefined) {
+    if (options.state !== undefined && options.states !== undefined) throw new Error("use either --state or --states, not both");
+    const states = command === "events" ? EVENT_STATES : command === "claims" ? CLAIM_STATES : BATCH_STATES;
+    for (const state of [option(options, "state"), ...(option(options, "states")?.split(",") ?? [])]) {
+      if (state !== undefined && !states.some((candidate) => candidate === state)) throw new Error(`invalid ${command} state: ${state}`);
+    }
+  }
+  const after = option(options, "after");
+  if (after !== undefined && (!ABSOLUTE_RFC3339.test(after) || Number.isNaN(new Date(after).getTime()))) {
+    throw new Error("--after must be an absolute RFC3339 timestamp");
+  }
 }
 
 function option(options: Args, key: string, fallback?: string): string | undefined {
@@ -155,6 +253,10 @@ function help(): void {
       "policy test --source SOURCE --event JSON [--file PATH]",
       "policy preview --source SOURCE --event JSON [--file PATH]",
       "inspect | events | claims | batches | receipts | bindings | endpoints",
+      "events [--state STATE] [--source SOURCE] [--after ISO] [--limit N]",
+      "claims [--state STATE | --states STATE,STATE] [--channel CHANNEL] [--source SOURCE] [--limit N]",
+      "batches [--state STATE | --states STATE,STATE] [--channel CHANNEL] [--limit N]",
+      "receipts [BATCH_ID] [--limit N]",
       "status --config PATH (secret-free queue/host/source health; does not recover leases)",
       "batch-retry BATCH_ID --expected-attempt N --reason TEXT (reopens dead-letter only; does not dispatch)",
       "prune --older-than-days N [--apply] (dry run unless --apply; removes finished claims/batches, never events or dedupe keys)",
@@ -184,10 +286,11 @@ function help(): void {
 async function main(): Promise<void> {
   const parsed = parseArgs(process.argv.slice(2));
   if (!KNOWN_COMMANDS.has(parsed.command)) throw new Error(`unknown command: ${parsed.command}`);
-  if (parsed.command === "help" || parsed.command === "--help") {
+  if (parsed.command === "help" || parsed.command === "--help" || parsed.options.help === true) {
     help();
     return;
   }
+  validateArgs(parsed);
   if (parsed.command === "init") {
     if (Object.prototype.hasOwnProperty.call(parsed.options, "admin_token")) {
       throw new Error("init generates the owner credential; --admin-token is not accepted");
@@ -332,9 +435,10 @@ async function main(): Promise<void> {
         externalHostError = error instanceof Error ? error.message : String(error);
       }
     }
+    const ok = release.ok && Boolean(installedSqlite) && adminReady && fileSecurity.ready && dataSecurity.ready
+      && configLoadError === null && sourceCredentialError === null && externalHostError === null;
     output({
-      ok: release.ok && Boolean(installedSqlite) && adminReady && fileSecurity.ready && dataSecurity.ready
-        && configLoadError === null && sourceCredentialError === null && externalHostError === null,
+      ok,
       release,
       runtime: { sqlite3: { available: Boolean(installedSqlite), installed_version: installedSqlite } },
       security: {
@@ -351,7 +455,7 @@ async function main(): Promise<void> {
       hosts: {
         contract: {
           protocol: "out_of_process_loopback_v1",
-          product_hosts_bundled: false,
+          product_hosts_bundled: true,
           responsibility: "session start/resume and envelope injection belong to the configured Host Adapter",
           receipt_rule: "transport acceptance is not agent start, seen, or consumed",
         },
@@ -363,6 +467,7 @@ async function main(): Promise<void> {
         },
       },
     });
+    if (!ok) process.exitCode = 2;
     return;
   }
   if (parsed.command === "connector-catalog") {
@@ -602,9 +707,6 @@ async function main(): Promise<void> {
       case "endpoint-register":
         {
           const hostKind = option(parsed.options, "host_kind", "mock")!;
-          if (Object.prototype.hasOwnProperty.call(parsed.options, "cold_routes")) {
-            throw new Error("--cold-routes has been removed; use --routes");
-          }
           const routes = option(parsed.options, "routes");
           const parsedRoutes = routes === undefined ? undefined : jsonOption(parsed.options, "routes", undefined);
           output(bridge.registerEndpoint({ id: option(parsed.options, "id"), host_kind: hostKind, session_ref: option(parsed.options, "session_ref", "cli")!, capabilities: jsonOption(parsed.options, "capabilities", undefined), routes: parsedRoutes }));
@@ -649,16 +751,25 @@ async function main(): Promise<void> {
         break;
       // Capped lists show the newest rows (still in chronological order), not the first page ever written.
       case "events":
-        output(bridge.listEvents({ newest_first: true }));
+        output(bridge.listEvents({ state: option(parsed.options, "state") as EventState | undefined,
+          source: option(parsed.options, "source"), after: option(parsed.options, "after"),
+          limit: optionalNumber(option(parsed.options, "limit"), "--limit"), newest_first: option(parsed.options, "after") === undefined }));
         break;
       case "claims":
-        output(bridge.listClaims({ newest_first: true }));
+        output(bridge.listClaims({ state: option(parsed.options, "state") as ClaimState | undefined,
+          states: option(parsed.options, "states")?.split(",") as ClaimState[] | undefined,
+          source: option(parsed.options, "source"), channel: option(parsed.options, "channel"),
+          limit: optionalNumber(option(parsed.options, "limit"), "--limit"), newest_first: true }));
         break;
       case "batches":
-        output(bridge.listBatches({ newest_first: true }));
+        output(bridge.listBatches({ states: option(parsed.options, "states")?.split(",") as BatchState[] | undefined
+          ?? (option(parsed.options, "state") ? [option(parsed.options, "state") as BatchState] : undefined),
+          channel: option(parsed.options, "channel"), limit: optionalNumber(option(parsed.options, "limit"), "--limit"), newest_first: true }));
         break;
       case "receipts":
-        output(parsed.rest[0] ? bridge.listReceipts(parsed.rest[0]) : bridge.listReceipts(undefined, { limit: 1000, newest_first: true }));
+        output(bridge.listReceipts(parsed.rest[0], {
+          limit: optionalNumber(option(parsed.options, "limit"), "--limit") ?? (parsed.rest[0] ? undefined : 1000), newest_first: true,
+        }));
         break;
       case "bindings":
         output(bridge.listBindings());

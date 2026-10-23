@@ -144,6 +144,42 @@ describe("immutable personal policy control plane", () => {
     }
   });
 
+  it("previews the effective installed rules, retaining omitted policies and applying newer versions", () => {
+    const bridge = createBridge();
+    try {
+      bridge.installPolicies([rule("existing", 1, "immediate", { source: "jobs" })]);
+      const event = { type: "job.completed", dedupe_key: "overlay", resource: { uri: "job://overlay" } };
+      const candidate = [rule("default", 2, "suppress")];
+      const before = bridge.inspect();
+      const preview = bridge.previewPolicy("jobs", event, candidate);
+      expect(preview).toMatchObject({ matched_policy: { id: "existing", version: 1 }, suppressed: false });
+      expect(bridge.testPolicy("jobs", event, candidate).matched_policy).toEqual(preview.matched_policy);
+      expect(bridge.inspect()).toEqual(before);
+      bridge.installPolicies(candidate);
+      expect(bridge.previewPolicy("jobs", event).matched_policy).toEqual(preview.matched_policy);
+      const disable = [{ ...rule("existing", 2, "immediate", { source: "jobs" }), enabled: false }];
+      expect(bridge.previewPolicy("jobs", event, disable)).toMatchObject({ matched_policy: { id: "default", version: 2 }, suppressed: true });
+      bridge.installPolicies(disable);
+      expect(bridge.emit("jobs", event)).toMatchObject({ suppressed: true, event: { matched_policy_id: "default", matched_policy_version: 2 } });
+    } finally { bridge.close(); }
+  });
+
+  it("rejects un-installable preview candidates without writing state", () => {
+    const bridge = createBridge();
+    try {
+      bridge.installPolicies([rule("jobs", 3, "immediate", { source: "jobs" })]);
+      const before = bridge.inspect();
+      const event = { type: "job.completed", dedupe_key: "invalid-preview", resource: { uri: "job://preview" } };
+      for (const candidates of [[rule("jobs", 2, "suppress")], [rule("jobs", 3, "suppress")], [rule("new", 1, "suppress"), rule("new", 1, "immediate")]]) {
+        expect(() => bridge.previewPolicy("jobs", event, candidates)).toThrow(BridgeError);
+        expect(() => bridge.testPolicy("jobs", event, candidates)).toThrow(BridgeError);
+        expect(bridge.inspect()).toEqual(before);
+      }
+      const identical = [rule("jobs", 3, "immediate", { source: "jobs" })];
+      expect(bridge.previewPolicy("jobs", event, identical).matched_policy.id).toBe("jobs");
+    } finally { bridge.close(); }
+  });
+
   it("exposes install/list/test/preview only through the authenticated owner API", async () => {
     const token = "owner-policy-token-0123456789abcdef";
     const config = { instance_id: "api", owner_id: "owner", db_path: temporary(), timezone: "UTC", admin_token: token };

@@ -331,13 +331,17 @@ export class WakeBridge {
       throw new BridgeError("incident_attention_channel must be a non-empty string of at most 200 characters", "invalid_config", 400);
     }
     const quietConfig = config.quiet_hours as unknown as Record<string, unknown> | null | undefined;
+    if (quietConfig != null && (typeof quietConfig !== "object" || Array.isArray(quietConfig))) {
+      throw new BridgeError("quiet_hours must be an object or null", "invalid_quiet_hours", 400);
+    }
     const unsupportedQuiet = ["resume_spread_ms", "default_action"].filter((field) => quietConfig && Object.prototype.hasOwnProperty.call(quietConfig, field));
     if (unsupportedQuiet.length) {
       throw new BridgeError(`unsupported quiet_hours field(s): ${unsupportedQuiet.join(", ")}`, "unsupported_config_field", 400);
     }
     const timezone = config.timezone ?? config.quiet_hours?.timezone ?? "UTC";
-    for (const candidate of new Set([timezone, config.quiet_hours?.timezone].filter((value): value is string => Boolean(value)))) {
+    for (const candidate of new Set([timezone, config.quiet_hours?.timezone].filter((value) => value !== undefined))) {
       try {
+        if (typeof candidate !== "string" || !candidate) throw new Error("invalid timezone");
         new Intl.DateTimeFormat("en", { timeZone: candidate }).format(new Date(0));
       } catch {
         throw new BridgeError(`timezone is invalid: ${candidate}`, "invalid_timezone", 400);
@@ -458,6 +462,17 @@ export class WakeBridge {
   }
 
   installPolicies(policies: PolicyRule[]): void {
+    const additions = this.policyAdditions(policies, this.listPolicies());
+    if (additions.length) {
+      const installedAt = this.nowIso();
+      this.db.transaction(additions.map((policy) => `INSERT INTO policies(id, version, enabled, order_no, rule_json, installed_at)
+        VALUES(${sqlValue(policy.id)}, ${policy.version}, ${policy.enabled === false ? 0 : 1}, ${Number(policy.order ?? 0)}, ${sqlJson(policy)}, ${sqlValue(installedAt)});`));
+    }
+    this.ensureDefaultPolicy();
+  }
+
+  // Installation and its read-only preview share immutable-version checks.
+  private policyAdditions(policies: PolicyRule[], installed: InstalledPolicyRule[]): PolicyRule[] {
     const all = policies.map(normalizePolicy);
     const requested = new Map<string, PolicyRule>();
     for (const policy of all) {
@@ -469,7 +484,6 @@ export class WakeBridge {
       requested.set(key, policy);
     }
 
-    const installed = this.listPolicies();
     const installedByVersion = new Map(installed.map((policy) => [`${policy.id}\u0000${policy.version}`, normalizeStoredPolicy(policy)]));
     const maxVersion = new Map<string, number>();
     for (const policy of installed) maxVersion.set(policy.id, Math.max(maxVersion.get(policy.id) ?? 0, policy.version));
@@ -492,12 +506,7 @@ export class WakeBridge {
       maxVersion.set(policy.id, policy.version);
     }
 
-    if (additions.length) {
-      const installedAt = this.nowIso();
-      this.db.transaction(additions.map((policy) => `INSERT INTO policies(id, version, enabled, order_no, rule_json, installed_at)
-        VALUES(${sqlValue(policy.id)}, ${policy.version}, ${policy.enabled === false ? 0 : 1}, ${Number(policy.order ?? 0)}, ${sqlJson(policy)}, ${sqlValue(installedAt)});`));
-    }
-    this.ensureDefaultPolicy();
+    return additions;
   }
 
   private ensureDefaultPolicy(): void {
@@ -519,7 +528,11 @@ export class WakeBridge {
 
   private policyForEvent(source: string, input: WakeEventInput, candidates?: PolicyRule[]): PolicyRule {
     const event = { ...input, source } as Record<string, unknown>;
-    const rows = candidates ? activePolicyVersions(candidates).filter((policy) => policy.enabled !== false) : this.policyRows();
+    const installed = candidates ? this.listPolicies() : null;
+    const rows = installed && candidates
+      ? activeInstalledPolicyVersions([...installed, ...this.policyAdditions(candidates, installed)])
+        .filter((policy) => policy.enabled !== false).filter(currentInstalledPolicy)
+      : this.policyRows();
     for (const policy of rows) {
       if (this.matches(policy.match ?? {}, event)) return policy;
     }
@@ -657,7 +670,7 @@ export class WakeBridge {
     const policy = this.policyForEvent(source, clean);
     const eventId = deterministicEventId || id("evt");
     const eventState: EventState = policy.delivery.mode === "suppress" ? "suppressed" : "matched";
-    let claimId = eventState === "matched" ? id("ac") : null;
+    const claimId = eventState === "matched" ? id("ac") : null;
     const channel = claimId ? this.targetChannel(policy, clean) : null;
     const claimState: ClaimState = "pending";
     let mergedClaim: AttentionClaim | null = null;
@@ -670,7 +683,6 @@ export class WakeBridge {
         return firstEvent?.source === source && existingPolicy != null
           && stableJson({ delivery: existingPolicy.delivery, batch: existingPolicy.batch, expires_after_ms: existingPolicy.expires_after_ms ?? null }) === mergeSemantics;
       }) ?? null;
-      if (mergedClaim) claimId = mergedClaim.id;
     }
     const statements = [
       `INSERT INTO events(id, instance_id, owner_id, source, type, schema_version, occurred_at, received_at, dedupe_key, coalesce_key, priority_hint, attention_channel_hint, actor_ref, resource_json, metadata_json, payload_preview, matched_policy_id, matched_policy_version)
@@ -681,19 +693,28 @@ export class WakeBridge {
       `UPDATE event_status SET state=${sqlValue(eventState)}, updated_at=${sqlValue(now)} WHERE event_id=${sqlValue(eventId)};`,
       `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at) VALUES(${sqlValue(eventId)}, ${sqlValue("received")}, ${sqlValue(eventState)}, ${sqlValue(policy.delivery.mode)}, ${sqlValue(now)});`,
     ];
-    if (claimId && channel && !mergedClaim) {
+    if (claimId && channel) {
+      if (mergedClaim) {
+        // Append to the durable array, not the candidate snapshot: another
+        // source worker may have merged since the pre-read. Only unfrozen
+        // claims can accept new events, even if an active gate state changed.
+        statements.push(`UPDATE claims SET event_ids_json=json_insert(event_ids_json, '$[#]', ${sqlValue(eventId)}), updated_at=${sqlValue(now)} WHERE id=${sqlValue(mergedClaim.id)} AND state IN (${ACTIVE_CLAIM_STATES.map(sqlValue).join(",")});`);
+        statements.push(`INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT id, state, state, 'merge_attention_duplicate', ${sqlValue(now)} FROM claims WHERE id=${sqlValue(mergedClaim.id)} AND changes()>0;`);
+      }
       const eligibleAfter = this.claimEligibleAfter(policy, this.now());
       const deferPresence = policy.delivery.foreground_presence_policy !== "bypass";
       const expiresAt = this.claimExpiresAt(policy, this.now());
+      // A concurrently frozen/finalized candidate cannot own this event.
+      // Create its replacement in the same transaction as ingestion so a
+      // matched event is never left without an attention claim.
+      const fallback = mergedClaim
+        ? ` WHERE NOT EXISTS (SELECT 1 FROM claims c, json_each(c.event_ids_json) j WHERE c.id=${sqlValue(mergedClaim.id)} AND j.value=${sqlValue(eventId)})`
+        : "";
       statements.push(
         `INSERT INTO claims(id, instance_id, origin, event_ids_json, resource_json, policy_id, policy_version, attention_channel, eligible_after, expires_at, defer_while_presence, state, reason_code, note, created_at, updated_at, snooze_until, consumed_result_json, dismissed_reason)
-         VALUES(${sqlValue(claimId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue("policy")}, ${sqlJson([eventId])}, ${sqlJson(clean.resource)}, ${sqlValue(policy.id)}, ${policy.version}, ${sqlValue(channel)}, ${sqlValue(eligibleAfter)}, ${sqlValue(expiresAt)}, ${deferPresence ? 1 : 0}, ${sqlValue(claimState)}, ${sqlValue(policy.reason_code ?? policy.id)}, NULL, ${sqlValue(now)}, ${sqlValue(now)}, NULL, NULL, NULL);`,
+         SELECT ${sqlValue(claimId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue("policy")}, ${sqlJson([eventId])}, ${sqlJson(clean.resource)}, ${sqlValue(policy.id)}, ${policy.version}, ${sqlValue(channel)}, ${sqlValue(eligibleAfter)}, ${sqlValue(expiresAt)}, ${deferPresence ? 1 : 0}, ${sqlValue(claimState)}, ${sqlValue(policy.reason_code ?? policy.id)}, NULL, ${sqlValue(now)}, ${sqlValue(now)}, NULL, NULL, NULL${fallback};`,
       );
-      statements.push(`INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) VALUES(${sqlValue(claimId)}, NULL, ${sqlValue(claimState)}, ${sqlValue("policy")}, ${sqlValue(now)});`);
-    } else if (mergedClaim) {
-      const eventIds = arrayWithoutDuplicates([...mergedClaim.event_ids, eventId]);
-      statements.push(`UPDATE claims SET event_ids_json=${sqlJson(eventIds)}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(mergedClaim.id)} AND state=${sqlValue(mergedClaim.state)};`);
-      statements.push(`INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT ${sqlValue(mergedClaim.id)}, ${sqlValue(mergedClaim.state)}, ${sqlValue(mergedClaim.state)}, 'merge_attention_duplicate', ${sqlValue(now)} WHERE changes()>0;`);
+      statements.push(`INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT ${sqlValue(claimId)}, NULL, ${sqlValue(claimState)}, ${sqlValue("policy")}, ${sqlValue(now)} WHERE changes()>0;`);
     }
     if (clean.idempotency_key) {
       statements.push(`INSERT OR IGNORE INTO idempotency_keys(scope, key, result_json, created_at) VALUES(${sqlValue(`event:${source}`)}, ${sqlValue(clean.idempotency_key)}, ${sqlJson({ event_id: eventId })}, ${sqlValue(now)});`);
@@ -711,7 +732,7 @@ export class WakeBridge {
       throw error;
     }
     const event = this.getEvent(eventId)!;
-    const claim = claimId ? this.getClaim(claimId) ?? undefined : undefined;
+    const claim = mergedClaim ? this.findClaimByEventId(eventId) : (claimId ? this.getClaim(claimId) ?? undefined : undefined);
     return { event, claim, duplicate: false, suppressed: eventState === "suppressed" };
   }
 
@@ -1333,12 +1354,13 @@ export class WakeBridge {
     // the timeout transition below, so a batch always spends at least one sweep
     // in needs_attention and still raises its incident.  A claim row that is
     // missing entirely keeps the item open.
-    const settledAckTimeout = `instance_id=${sqlValue(this.config.instance_id)} AND state='needs_attention' AND last_error='ack_timeout'
-         AND json_array_length(claim_ids_json)>0
+    const allClaimsFinalized = `json_array_length(claim_ids_json)>0
          AND NOT EXISTS (
            SELECT 1 FROM json_each(batches.claim_ids_json) j LEFT JOIN claims c ON c.id=j.value
            WHERE c.id IS NULL OR c.state NOT IN (${FINALIZED_CLAIM_STATES.map(sqlValue).join(",")})
          )`;
+    const settledAckTimeout = `instance_id=${sqlValue(this.config.instance_id)} AND state='needs_attention' AND last_error='ack_timeout'
+         AND ${allClaimsFinalized}`;
     this.db.transaction([
       `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
        SELECT id, 'needs_attention', 'cancelled', 'all_claims_finalized_reconciled', ${sqlValue(now)} FROM batches WHERE ${settledAckTimeout};`,
@@ -1369,6 +1391,20 @@ export class WakeBridge {
          );`,
       `UPDATE delivery_correlations SET state='expired' WHERE state='outstanding' AND expires_at<${sqlValue(now)};`,
     ]);
+    // Finalization during an in-flight request cannot detach its frozen refs.
+    // After failure (or lease recovery above), retire that work before another
+    // attempt is acquired. Also reconcile historical empty_batch incidents,
+    // but never infer completion from an empty payload or a missing claim.
+    const settledUnsent = `instance_id=${sqlValue(this.config.instance_id)}
+      AND (state IN (${OPEN_BATCH_STATES.map(sqlValue).join(",")}) OR (state='needs_attention' AND last_error='empty_batch'))
+      AND ${allClaimsFinalized}`;
+    const settled = this.db.query<DbRow>(`SELECT id, state FROM batches WHERE ${settledUnsent};`);
+    if (settled.length) this.db.transaction(settled.flatMap((batch) => [
+      `UPDATE batches SET state='cancelled', lease_expires_at=NULL, updated_at=${sqlValue(now)}
+       WHERE id=${sqlValue(batch.id)} AND state=${sqlValue(batch.state)} AND ${settledUnsent};`,
+      `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
+       SELECT ${sqlValue(batch.id)}, ${sqlValue(batch.state)}, 'cancelled', 'all_claims_finalized_reconciled', ${sqlValue(now)} WHERE changes()>0;`,
+    ]));
     for (const row of timedOut) {
       const batch = this.getBatch(String(row.id));
       if (!batch || batch.state !== "needs_attention" || batch.last_error !== "ack_timeout") continue;
@@ -1438,7 +1474,7 @@ export class WakeBridge {
       if (!ACTIVE_CLAIM_STATES.includes(claim.state)) continue;
       if (claim.expires_at && claim.expires_at <= now) {
         transitions.push(...this.claimStateSql(claim, "expired", now, "expiry"));
-        for (const eventId of claim.event_ids) transitions.push(...this.eventStateSql(eventId, "expired", now, "claim_expired"));
+        transitions.push(...this.claimEventStateSql(claim.id, "expired", "expired", now, "claim_expired"));
         result.expired_claims.push(claim.id);
         continue;
       }
@@ -1464,70 +1500,84 @@ export class WakeBridge {
       }
     }
     if (transitions.length) this.db.transaction(transitions);
+    if (result.expired_claims.length) {
+      const expired = new Set(this.db.query<DbRow>(`SELECT id FROM claims WHERE state='expired' AND id IN (${result.expired_claims.map(sqlValue).join(",")});`).map((row) => String(row.id)));
+      result.expired_claims = result.expired_claims.filter((claimId) => expired.has(claimId));
+    }
 
     const eligible = this.listClaims({ state: "eligible", limit: 100_000 });
-    const events = new Map<string, WakeEvent>();
-    for (const claim of eligible) {
-      for (const eventId of claim.event_ids) {
-        const event = this.getEvent(eventId);
-        if (event) events.set(event.id, event);
-      }
-    }
     const open = this.listBatches({ states: OPEN_BATCH_STATES, limit: 100_000 });
     const openByKey = new Map<string, WakeBatch>();
     for (const batch of open) {
       if (!batch.deadline || batch.deadline > now) openByKey.set(this.batchKey(batch.policy_id, batch.policy_version, batch.attention_channel, batch.coalesce_key ?? null), batch);
     }
     const batchStatements: string[] = [];
+    const appendedClaims: Array<{ batchId: string; claimId: string }> = [];
     for (const claim of eligible) {
       const policy = this.policy(claim.policy_id, claim.policy_version) ?? normalizePolicy(DEFAULT_POLICY);
-      const event = events.get(claim.event_ids[0]);
+      const event = this.getEvent(claim.event_ids[0]) ?? undefined;
       const coalesce = this.coalesceKey(policy, claim, event);
       const key = this.batchKey(claim.policy_id, claim.policy_version, claim.attention_channel, coalesce);
       const maxEvents = Math.max(1, Math.floor(policy.batch?.max_events ?? 20));
       let batch = openByKey.get(key);
       if (batch && batch.claim_ids.length < maxEvents && batch.deadline && batch.deadline > now) {
-        const claimIds = arrayWithoutDuplicates([...batch.claim_ids, claim.id]);
-        const eventIds = arrayWithoutDuplicates([...batch.event_ids, ...claim.event_ids]);
-        batchStatements.push(...this.batchUpdateArraysSql(batch, claimIds, eventIds, now));
-        batch.claim_ids = claimIds;
-        batch.event_ids = eventIds;
-        batch.updated_at = now;
-        batchStatements.push(...this.claimStateSql(claim, "batched", now, `batch:${batch.id}`));
-        for (const eventId of claim.event_ids) batchStatements.push(...this.eventStateSql(eventId, "batched", now, `batch:${batch.id}`));
-        result.batches_updated.push(batch.id);
-        continue;
+        // Both arrays may have grown since planning. Append the current
+        // claim's refs only while the destination can still accept it.
+        batchStatements.push(`UPDATE batches SET claim_ids_json=json_insert(claim_ids_json, '$[#]', ${sqlValue(claim.id)}),
+          event_ids_json=(SELECT json_group_array(value) FROM (
+            SELECT value FROM json_each(batches.event_ids_json)
+            UNION ALL
+            SELECT j.value FROM claims c, json_each(c.event_ids_json) j WHERE c.id=${sqlValue(claim.id)}
+              AND NOT EXISTS (SELECT 1 FROM json_each(batches.event_ids_json) existing WHERE existing.value=j.value)
+          )), updated_at=${sqlValue(now)}
+          WHERE id=${sqlValue(batch.id)} AND state IN (${OPEN_BATCH_STATES.map(sqlValue).join(",")})
+            AND deadline>${sqlValue(now)} AND json_array_length(claim_ids_json)<${maxEvents}
+            AND NOT EXISTS (SELECT 1 FROM json_each(batches.claim_ids_json) WHERE value=${sqlValue(claim.id)})
+            AND EXISTS (SELECT 1 FROM claims WHERE id=${sqlValue(claim.id)} AND state='eligible');`);
+        batchStatements.push(`INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at) SELECT id, state, state, 'append_claim', ${sqlValue(now)} FROM batches WHERE id=${sqlValue(batch.id)} AND changes()>0;`);
+        batch.claim_ids = arrayWithoutDuplicates([...batch.claim_ids, claim.id]);
+        appendedClaims.push({ batchId: batch.id, claimId: claim.id });
+      } else {
+        const windowMs = assertFiniteMs(policy.batch?.window_ms, "batch.window_ms", this.config.batch_window_ms!);
+        const batchId = id("wb");
+        batch = {
+          id: batchId,
+          instance_id: this.config.instance_id,
+          policy_id: claim.policy_id,
+          policy_version: claim.policy_version,
+          attention_channel: claim.attention_channel,
+          claim_ids: [claim.id],
+          event_ids: [...claim.event_ids],
+          coalesce_key: coalesce,
+          state: "pending",
+          not_before: now,
+          deadline: addMs(nowDate, windowMs),
+          attempt: 0,
+          binding_generation: null,
+          created_at: now,
+          updated_at: now,
+          lease_expires_at: null,
+          last_error: null,
+        };
+        batchStatements.push(this.batchInsertSql(batch, claim.id));
+        batchStatements.push(`INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at) SELECT ${sqlValue(batchId)}, NULL, 'pending', 'freeze', ${sqlValue(now)} WHERE changes()>0;`);
+        openByKey.set(key, batch);
+        result.batches_created.push(batchId);
       }
-      const windowMs = assertFiniteMs(policy.batch?.window_ms, "batch.window_ms", this.config.batch_window_ms!);
-      const batchId = id("wb");
-      const deadline = addMs(nowDate, windowMs);
-      const newBatch: WakeBatch = {
-        id: batchId,
-        instance_id: this.config.instance_id,
-        policy_id: claim.policy_id,
-        policy_version: claim.policy_version,
-        attention_channel: claim.attention_channel,
-        claim_ids: [claim.id],
-        event_ids: [...claim.event_ids],
-        coalesce_key: coalesce,
-        state: "pending",
-        not_before: now,
-        deadline,
-        attempt: 0,
-        binding_generation: null,
-        created_at: now,
-        updated_at: now,
-        lease_expires_at: null,
-        last_error: null,
-      };
-      batchStatements.push(this.batchInsertSql(newBatch));
-      batchStatements.push(`INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at) VALUES(${sqlValue(batchId)}, NULL, 'pending', 'freeze', ${sqlValue(now)});`);
-      batchStatements.push(...this.claimStateSql(claim, "batched", now, `batch:${batchId}`));
-      for (const eventId of claim.event_ids) batchStatements.push(...this.eventStateSql(eventId, "batched", now, `batch:${batchId}`));
-      openByKey.set(key, newBatch);
-      result.batches_created.push(batchId);
+      // Keep this CAS adjacent to the conditional batch transition. If the
+      // insertion/append lost a race, the claim stays eligible for the next tick.
+      batchStatements.push(`UPDATE claims SET state='batched', updated_at=${sqlValue(now)} WHERE id=${sqlValue(claim.id)} AND state='eligible' AND changes()>0;`);
+      batchStatements.push(`INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT ${sqlValue(claim.id)}, 'eligible', 'batched', ${sqlValue(`batch:${batch.id}`)}, ${sqlValue(now)} WHERE changes()>0;`);
+      batchStatements.push(...this.claimEventStateSql(claim.id, "batched", "batched", now, `batch:${batch.id}`));
     }
-    if (batchStatements.length) this.db.transaction(batchStatements);
+    if (batchStatements.length) {
+      this.db.transaction(batchStatements);
+      const batchIds = arrayWithoutDuplicates([...result.batches_created, ...appendedClaims.map((candidate) => candidate.batchId)]);
+      const current = new Map(this.db.query<DbRow>(`SELECT id, claim_ids_json FROM batches WHERE id IN (${batchIds.map(sqlValue).join(",")});`)
+        .map((row) => [String(row.id), jsonRecord<string[]>(row.claim_ids_json, [])]));
+      result.batches_created = result.batches_created.filter((batchId) => current.has(batchId));
+      result.batches_updated = appendedClaims.filter(({ batchId, claimId }) => current.get(batchId)?.includes(claimId)).map(({ batchId }) => batchId);
+    }
     return result;
   }
 
@@ -1545,12 +1595,13 @@ export class WakeBridge {
     ];
   }
 
-  private eventStateSql(eventId: string, state: EventState, now: string, reason: string): string[] {
-    const current = this.getEvent(eventId)?.state;
-    if (!current || current === state) return [];
+  private claimEventStateSql(claimId: string, claimState: ClaimState, state: EventState, now: string, reason: string): string[] {
+    // Read membership and the audit's from_state inside the writing transaction.
+    // A failed claim CAS must not finalize or batch its events independently.
+    const membership = `SELECT j.value FROM claims c, json_each(c.event_ids_json) j WHERE c.id=${sqlValue(claimId)} AND c.state=${sqlValue(claimState)}`;
     return [
-      `UPDATE event_status SET state=${sqlValue(state)}, updated_at=${sqlValue(now)} WHERE event_id=${sqlValue(eventId)};`,
-      `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at) VALUES(${sqlValue(eventId)}, ${sqlValue(current)}, ${sqlValue(state)}, ${sqlValue(reason)}, ${sqlValue(now)});`,
+      `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at) SELECT event_id, state, ${sqlValue(state)}, ${sqlValue(reason)}, ${sqlValue(now)} FROM event_status WHERE event_id IN (${membership}) AND state<>${sqlValue(state)};`,
+      `UPDATE event_status SET state=${sqlValue(state)}, updated_at=${sqlValue(now)} WHERE event_id IN (${membership}) AND state<>${sqlValue(state)};`,
     ];
   }
 
@@ -1567,16 +1618,9 @@ export class WakeBridge {
     return `${policyId}:${version}:${channel}:${coalesce ?? ""}`;
   }
 
-  private batchInsertSql(batch: WakeBatch): string {
+  private batchInsertSql(batch: WakeBatch, claimId: string): string {
     return `INSERT INTO batches(id, instance_id, policy_id, policy_version, attention_channel, claim_ids_json, event_ids_json, coalesce_key, state, not_before, deadline, attempt, binding_generation, created_at, updated_at, lease_expires_at, last_error)
-      VALUES(${sqlValue(batch.id)}, ${sqlValue(batch.instance_id)}, ${sqlValue(batch.policy_id)}, ${batch.policy_version}, ${sqlValue(batch.attention_channel)}, ${sqlJson(batch.claim_ids)}, ${sqlJson(batch.event_ids)}, ${sqlValue(batch.coalesce_key)}, ${sqlValue(batch.state)}, ${sqlValue(batch.not_before)}, ${sqlValue(batch.deadline)}, ${batch.attempt}, NULL, ${sqlValue(batch.created_at)}, ${sqlValue(batch.updated_at)}, NULL, NULL);`;
-  }
-
-  private batchUpdateArraysSql(batch: WakeBatch, claimIds: string[], eventIds: string[], now: string): string[] {
-    return [
-      `UPDATE batches SET claim_ids_json=${sqlJson(claimIds)}, event_ids_json=${sqlJson(eventIds)}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(batch.id)} AND state IN ('pending','waiting_for_endpoint','retry_wait');`,
-      `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at) SELECT ${sqlValue(batch.id)}, state, state, 'append_claim', ${sqlValue(now)} FROM batches WHERE id=${sqlValue(batch.id)} AND changes()>0;`,
-    ];
+      SELECT ${sqlValue(batch.id)}, ${sqlValue(batch.instance_id)}, ${sqlValue(batch.policy_id)}, ${batch.policy_version}, ${sqlValue(batch.attention_channel)}, ${sqlJson(batch.claim_ids)}, event_ids_json, ${sqlValue(batch.coalesce_key)}, ${sqlValue(batch.state)}, ${sqlValue(batch.not_before)}, ${sqlValue(batch.deadline)}, ${batch.attempt}, NULL, ${sqlValue(batch.created_at)}, ${sqlValue(batch.updated_at)}, NULL, NULL FROM claims WHERE id=${sqlValue(claimId)} AND state='eligible';`;
   }
 
   getBatch(batchId: string): WakeBatch | null {
@@ -1688,7 +1732,124 @@ export class WakeBridge {
     return { batch_id: batch.id, status: "waiting_for_endpoint" };
   }
 
-  private acquireBatch(batch: WakeBatch, binding: Binding, now: string): { batch: WakeBatch; attemptId: string } | null {
+  private dispatchClaimsSnapshotSql(snapshots: Array<[string, AttentionClaim | null]>): string {
+    const expected = snapshots.map(([claimId, claim]) => claim ? {
+      id: claimId, state: claim.state, policy_id: claim.policy_id, policy_version: claim.policy_version,
+      attention_channel: claim.attention_channel, event_ids: claim.event_ids, eligible_after: claim.eligible_after,
+      expires_at: claim.expires_at ?? null, defer_while_presence: claim.defer_while_presence, updated_at: claim.updated_at,
+    } : { id: claimId, missing: true });
+    // One JSON relation keeps the fence below SQLite's expression-depth limit
+    // even for the public maximum of 1000 claims in one batch.
+    return `NOT EXISTS (SELECT 1 FROM json_each(${sqlJson(expected)}) s LEFT JOIN claims c
+      ON c.id=json_extract(s.value, '$.id') AND c.instance_id=${sqlValue(this.config.instance_id)}
+      WHERE CASE WHEN json_extract(s.value, '$.missing') THEN c.id IS NOT NULL ELSE c.id IS NULL
+        OR c.state IS NOT json_extract(s.value, '$.state') OR c.policy_id IS NOT json_extract(s.value, '$.policy_id')
+        OR c.policy_version IS NOT json_extract(s.value, '$.policy_version') OR c.attention_channel IS NOT json_extract(s.value, '$.attention_channel')
+        OR c.event_ids_json IS NOT json_extract(s.value, '$.event_ids') OR c.eligible_after IS NOT json_extract(s.value, '$.eligible_after')
+        OR c.expires_at IS NOT json_extract(s.value, '$.expires_at') OR c.defer_while_presence IS NOT json_extract(s.value, '$.defer_while_presence')
+        OR c.updated_at IS NOT json_extract(s.value, '$.updated_at') END)`;
+  }
+
+  private dispatchPresenceSnapshotSql(channel: string, presence: PresenceLease | null, now: string): string {
+    const active = `SELECT 1 FROM presence_leases p JOIN bindings b
+      ON b.instance_id=p.instance_id AND b.attention_channel=p.attention_channel
+        AND b.endpoint_id=p.endpoint_id AND b.generation=p.binding_generation
+      JOIN endpoints e ON e.id=p.endpoint_id AND e.instance_id=p.instance_id
+      WHERE p.instance_id=${sqlValue(this.config.instance_id)} AND p.attention_channel=${sqlValue(channel)}
+        AND p.expires_at>${sqlValue(now)} AND e.lease_expires_at>${sqlValue(now)}`;
+    return presence
+      ? `EXISTS (${active} AND p.endpoint_id=${sqlValue(presence.endpoint_id)} AND p.binding_generation=${presence.binding_generation}
+          AND p.renewed_at=${sqlValue(presence.renewed_at)} AND p.expires_at=${sqlValue(presence.expires_at)})`
+      : `NOT EXISTS (${active})`;
+  }
+
+  /** Recheck only unsent work. An acquired/accepted batch is never retracted by a gate. */
+  private recheckDispatchGates(batch: WakeBatch, nowDate: Date): { batch: WakeBatch; fenceSql: string; quietActive: boolean } | null {
+    const now = nowDate.toISOString();
+    const claims = this.db.query<DbRow>(`SELECT c.* FROM json_each(${sqlJson(batch.claim_ids)}) j JOIN claims c ON c.id=j.value
+      WHERE c.instance_id=${sqlValue(this.config.instance_id)};`).map((row) => this.claimFromRow(row));
+    const byId = new Map(claims.map((claim) => [claim.id, claim]));
+    const snapshots = new Map(batch.claim_ids.map((claimId) => [claimId, byId.get(claimId) ?? null]));
+    const presences = new Map<string, PresenceLease | null>();
+    const quietActive = quietWindowAt(nowDate, this.config.quiet_hours, this.config.timezone ?? "UTC");
+    const policies = new Map<string, InstalledPolicyRule>();
+    let quietEnd: string | undefined;
+    const gated: Array<{ claim: AttentionClaim; state: "expired" | "deferred"; eligibleAfter: string; reason: string }> = [];
+    for (const claim of snapshots.values()) {
+      if (!claim || claim.state !== "batched") continue;
+      if (claim.expires_at && claim.expires_at <= now) {
+        gated.push({ claim, state: "expired", eligibleAfter: claim.eligible_after, reason: "expiry" });
+        continue;
+      }
+      if (quietActive) {
+        const policyKey = `${claim.policy_id}:${claim.policy_version}`;
+        const policy = policies.get(policyKey) ?? this.policy(claim.policy_id, claim.policy_version) ?? normalizePolicy(DEFAULT_POLICY);
+        policies.set(policyKey, policy);
+        if (policy.delivery.quiet_hours_policy !== "bypass") {
+          quietEnd ??= quietEndAfter(nowDate, this.config.quiet_hours, this.config.timezone ?? "UTC").toISOString();
+          gated.push({ claim, state: "deferred", eligibleAfter: quietEnd, reason: "quiet_hours" });
+          continue;
+        }
+      }
+      if (claim.defer_while_presence && !presences.has(claim.attention_channel)) {
+        presences.set(claim.attention_channel, this.presenceActive(claim.attention_channel, now));
+      }
+      const presence = claim.defer_while_presence ? presences.get(claim.attention_channel) : null;
+      if (presence) gated.push({ claim, state: "deferred", eligibleAfter: presence.expires_at, reason: "foreground_presence" });
+    }
+    const presenceFence = [...presences].map(([channel, presence]) => this.dispatchPresenceSnapshotSql(channel, presence, now)).join(" AND ") || "1";
+    const removed = new Set(gated.map(({ claim }) => claim.id));
+    const claimIds = batch.claim_ids.filter((claimId) => !removed.has(claimId));
+    const removedEvents = new Set(gated.flatMap(({ claim }) => claim.event_ids));
+    const retainedEvents = new Set(claimIds.flatMap((claimId) => snapshots.get(claimId)?.event_ids ?? []));
+    const eventIds = batch.event_ids.filter((eventId) => !removedEvents.has(eventId) || retainedEvents.has(eventId));
+    if (gated.length) {
+      const inputFence = this.dispatchClaimsSnapshotSql([...snapshots]);
+      const nextState = claimIds.length ? batch.state : "cancelled";
+      const reasons = arrayWithoutDuplicates(gated.map(({ reason }) => reason));
+      const reason = reasons.length === 1 ? reasons[0] : "dispatch_gates";
+      const affectedIds = gated.map(({ claim }) => sqlValue(claim.id)).join(",");
+      const stateCases = gated.map(({ claim, state }) => `WHEN ${sqlValue(claim.id)} THEN ${sqlValue(state)}`).join(" ");
+      const eligibleCases = gated.map(({ claim, eligibleAfter }) => `WHEN ${sqlValue(claim.id)} THEN ${sqlValue(eligibleAfter)}`).join(" ");
+      const reasonCases = gated.map(({ claim, reason: claimReason }) => `WHEN ${sqlValue(claim.id)} THEN ${sqlValue(claimReason)}`).join(" ");
+      // The first CAS fences the whole snapshot. With the write lock held,
+      // changes() then carries that success through the remaining statements.
+      // A concurrent append/state change skips this sweep without losing refs.
+      const statements = [
+        `UPDATE batches SET claim_ids_json=${sqlJson(claimIds)}, event_ids_json=${sqlJson(eventIds)}, state=${sqlValue(nextState)},
+           updated_at=${sqlValue(now)}, lease_expires_at=NULL, last_error=${claimIds.length ? "last_error" : sqlValue(reason)}
+         WHERE id=${sqlValue(batch.id)} AND instance_id=${sqlValue(this.config.instance_id)}
+           AND state=${sqlValue(batch.state)} AND state IN (${OPEN_BATCH_STATES.map(sqlValue).join(",")}) AND attempt=${batch.attempt}
+           AND claim_ids_json=${sqlJson(batch.claim_ids)} AND event_ids_json=${sqlJson(batch.event_ids)}
+           AND policy_id=${sqlValue(batch.policy_id)} AND policy_version=${batch.policy_version}
+           AND attention_channel=${sqlValue(batch.attention_channel)} AND not_before=${sqlValue(batch.not_before)} AND deadline IS ${sqlValue(batch.deadline)}
+           AND (${inputFence}) AND (${presenceFence});`,
+        `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
+         SELECT ${sqlValue(batch.id)}, ${sqlValue(batch.state)}, ${sqlValue(nextState)}, ${sqlValue(reason)}, ${sqlValue(now)} WHERE changes()>0;`,
+        `INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at)
+         SELECT id, state, CASE id ${stateCases} END, CASE id ${reasonCases} END, ${sqlValue(now)}
+         FROM claims WHERE id IN (${affectedIds}) AND changes()>0;`,
+        `UPDATE claims SET state=CASE id ${stateCases} END, eligible_after=CASE id ${eligibleCases} END, updated_at=${sqlValue(now)}
+         WHERE id IN (${affectedIds}) AND changes()>0;`,
+      ];
+      const expiredEvents = arrayWithoutDuplicates(gated.filter(({ state }) => state === "expired").flatMap(({ claim }) => claim.event_ids));
+      if (expiredEvents.length) statements.push(
+        `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at)
+         SELECT event_id, state, 'expired', 'claim_expired', ${sqlValue(now)} FROM event_status
+         WHERE event_id IN (${expiredEvents.map(sqlValue).join(",")}) AND state<>'expired' AND changes()>0;`,
+        `UPDATE event_status SET state='expired', updated_at=${sqlValue(now)}
+         WHERE event_id IN (${expiredEvents.map(sqlValue).join(",")}) AND state<>'expired' AND changes()>0;`,
+      );
+      this.db.transaction(statements);
+    }
+    const refreshed = this.getBatch(batch.id);
+    if (!refreshed || JSON.stringify(refreshed.claim_ids) !== JSON.stringify(claimIds)
+      || JSON.stringify(refreshed.event_ids) !== JSON.stringify(eventIds)) return null;
+    const remainingFence = this.dispatchClaimsSnapshotSql(claimIds.map((claimId) => [claimId, snapshots.get(claimId) ?? null]));
+    return { batch: refreshed, fenceSql: `(${remainingFence}) AND (${presenceFence})`, quietActive };
+  }
+
+  private acquireBatch(batch: WakeBatch, binding: Binding, now: string, gateFence: string): { batch: WakeBatch; attemptId: string } | null {
     const attemptId = id("attempt");
     const leaseUntil = addMs(now, this.config.dispatch_lease_ms!);
     const fromState = batch.state;
@@ -1696,7 +1857,10 @@ export class WakeBridge {
       "BEGIN IMMEDIATE;",
       `UPDATE batches SET state='dispatching', attempt=attempt+1, binding_generation=${binding.generation}, lease_expires_at=${sqlValue(leaseUntil)}, updated_at=${sqlValue(now)}, last_error=${sqlValue(attemptId)}
        WHERE id=${sqlValue(batch.id)} AND instance_id=${sqlValue(this.config.instance_id)} AND state IN ('pending','retry_wait','waiting_for_endpoint')
-       AND not_before<=${sqlValue(now)} AND (state='waiting_for_endpoint' OR deadline IS NULL OR deadline<=${sqlValue(now)});`,
+       AND not_before<=${sqlValue(now)} AND (state='waiting_for_endpoint' OR deadline IS NULL OR deadline<=${sqlValue(now)})
+       AND claim_ids_json=${sqlJson(batch.claim_ids)} AND event_ids_json=${sqlJson(batch.event_ids)} AND (${gateFence})
+       AND NOT EXISTS (SELECT 1 FROM json_each(batches.claim_ids_json) j JOIN claims c ON c.id=j.value
+         WHERE c.state='batched' AND c.expires_at IS NOT NULL AND c.expires_at<=${sqlValue(now)});`,
       `INSERT INTO outbox_attempts(id, batch_id, attempt_no, state, transport_kind, endpoint_id, binding_generation, leased_until, started_at)
        SELECT ${sqlValue(attemptId)}, id, attempt, 'leased', NULL, ${sqlValue(binding.endpoint_id)}, ${binding.generation}, ${sqlValue(leaseUntil)}, ${sqlValue(now)} FROM batches
        WHERE id=${sqlValue(batch.id)} AND state='dispatching' AND lease_expires_at=${sqlValue(leaseUntil)} AND last_error=${sqlValue(attemptId)};`,
@@ -1725,11 +1889,18 @@ export class WakeBridge {
     const errorClass = effectiveAccepted ? null : result.error_class || "transport_rejected";
     const errorMessage = result.error_message || null;
     const requestedRetry = result.retry_after_ms;
+    // attempt is the durable cumulative acquisition count, including retries
+    // across restarts and binding generations; it is not a failure streak.
+    const maxRetryDelay = Math.max(this.config.retry_delay_ms!, 5 * 60_000);
+    let backedOffRetryDelay = this.config.retry_delay_ms!;
+    for (let attempt = 1; attempt < batch.attempt && backedOffRetryDelay > 0 && backedOffRetryDelay < maxRetryDelay; attempt += 1) {
+      backedOffRetryDelay = Math.min(backedOffRetryDelay * 2, maxRetryDelay);
+    }
     const retryDelay = requestedRetry !== undefined
       && Number.isFinite(requestedRetry)
       && requestedRetry >= 0
       ? Math.min(requestedRetry, 24 * 60 * 60_000)
-      : this.config.retry_delay_ms!;
+      : backedOffRetryDelay;
     const nextNotBefore = effectiveAccepted ? batch.not_before : addMs(now, retryDelay);
     const statements = [
       `UPDATE outbox_attempts SET state=${sqlValue(effectiveAccepted ? "accepted" : "failed")}, transport_kind=${sqlValue(result.transport_kind || transportKind)}, finished_at=${sqlValue(now)}, error_class=${sqlValue(errorClass)}, error_message=${sqlValue(hostAttested ? null : errorMessage)} WHERE id=${sqlValue(attemptId)} AND state='leased';`,
@@ -1759,7 +1930,12 @@ export class WakeBridge {
 
   /** Dispatch due durable batches. The lease CAS prevents double-dispatch. */
   async dispatchDue(nowDate = this.now()): Promise<DispatchResult[]> {
-    const now = nowDate.toISOString();
+    const clockStartedAt = this.now().getTime();
+    // An explicit date remains a not-earlier-than sweep start, never a way to
+    // create historical leases. Advance that start with actual clock elapsed
+    // time, including time spent awaiting earlier transports in this sweep.
+    const startedAt = Math.max(nowDate.getTime(), clockStartedAt);
+    const dispatchNow = () => new Date(startedAt + Math.max(0, this.now().getTime() - clockStartedAt));
     // A worker can disappear without a process restart in the daemon (for
     // example, an adapter promise is rejected).  Expired leases are safe to
     // reclaim on every sweep; the attempt id CAS below still protects a live
@@ -1768,14 +1944,30 @@ export class WakeBridge {
     const batches = this.listBatches({ states: OPEN_BATCH_STATES, limit: 100_000 });
     const results: DispatchResult[] = [];
     for (const listed of batches) {
-      if (listed.not_before > now) continue;
-      if (listed.state !== "waiting_for_endpoint" && listed.deadline && listed.deadline > now) continue;
-      const resolved = this.resolveBinding(listed.attention_channel, now);
-      if (!resolved) {
-        results.push(this.markNoEndpoint(listed, now));
+      const current = this.getBatch(listed.id);
+      if (!current || !OPEN_BATCH_STATES.includes(current.state)) continue;
+      const gateDate = dispatchNow();
+      const gateAt = gateDate.toISOString();
+      if (current.not_before > gateAt) continue;
+      if (current.state !== "waiting_for_endpoint" && current.deadline && current.deadline > gateAt) continue;
+      const prepared = this.recheckDispatchGates(current, gateDate);
+      if (!prepared || !OPEN_BATCH_STATES.includes(prepared.batch.state)) {
+        results.push({ batch_id: listed.id, status: "skipped" });
         continue;
       }
-      const transport = this.chooseTransport(listed, resolved.endpoint);
+      const batch = prepared.batch;
+      const acquireDate = dispatchNow();
+      const now = acquireDate.toISOString();
+      if (quietWindowAt(acquireDate, this.config.quiet_hours, this.config.timezone ?? "UTC") !== prepared.quietActive) {
+        results.push({ batch_id: listed.id, status: "skipped" });
+        continue;
+      }
+      const resolved = this.resolveBinding(batch.attention_channel, now);
+      if (!resolved) {
+        results.push(this.markNoEndpoint(batch, now));
+        continue;
+      }
+      const transport = this.chooseTransport(batch, resolved.endpoint);
       if (!transport) {
         this.db.transaction([
           `UPDATE batches SET state='waiting_for_endpoint', last_error='no_compatible_transport', updated_at=${sqlValue(now)} WHERE id=${sqlValue(listed.id)} AND state IN ('pending','retry_wait');`,
@@ -1784,32 +1976,35 @@ export class WakeBridge {
         results.push({ batch_id: listed.id, status: "waiting_for_endpoint", error_class: "no_compatible_transport" });
         continue;
       }
-      const acquired = this.acquireBatch(listed, resolved.binding, now);
+      const acquired = this.acquireBatch(batch, resolved.binding, now, prepared.fenceSql);
       if (!acquired) {
         results.push({ batch_id: listed.id, status: "skipped" });
-        continue;
-      }
-      if (!this.bindingStillCurrent(resolved.binding, now)) {
-        this.db.transaction([
-          `UPDATE outbox_attempts SET state='failed', finished_at=${sqlValue(now)}, error_class='stale_generation', error_message='binding changed before dispatch' WHERE id=${sqlValue(acquired.attemptId)} AND state='leased';`,
-          `UPDATE batches SET state='retry_wait', not_before=${sqlValue(addMs(now, this.config.retry_delay_ms!))}, lease_expires_at=NULL, updated_at=${sqlValue(now)}, last_error='stale_generation' WHERE id=${sqlValue(listed.id)} AND state='dispatching';`,
-          `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at) SELECT ${sqlValue(listed.id)}, 'dispatching', 'retry_wait', 'stale_generation', ${sqlValue(now)} WHERE changes()>0;`,
-        ]);
-        results.push({ batch_id: listed.id, status: "stale_generation", attempt_id: acquired.attemptId, endpoint_id: resolved.binding.endpoint_id, generation: resolved.binding.generation, error_class: "stale_generation" });
         continue;
       }
       const payload = this.buildPayload(acquired.batch, resolved.binding);
       if (!payload.claim_refs.length) {
         this.db.transaction([
-          `UPDATE outbox_attempts SET state='failed', finished_at=${sqlValue(now)}, error_class='empty_batch', error_message='all claims were finalized before dispatch' WHERE id=${sqlValue(acquired.attemptId)} AND state='leased';`,
-          `UPDATE batches SET state='needs_attention', lease_expires_at=NULL, updated_at=${sqlValue(now)}, last_error='empty_batch' WHERE id=${sqlValue(listed.id)} AND state='dispatching';`,
+          `UPDATE outbox_attempts SET state='failed', finished_at=${sqlValue(now)}, error_class='empty_batch', error_message='batch has no deliverable claims' WHERE id=${sqlValue(acquired.attemptId)} AND state='leased';`,
+          `UPDATE batches SET state='needs_attention', lease_expires_at=NULL, updated_at=${sqlValue(now)}, last_error='empty_batch' WHERE id=${sqlValue(listed.id)} AND state='dispatching' AND last_error=${sqlValue(acquired.attemptId)};`,
+          `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
+           SELECT ${sqlValue(listed.id)}, 'dispatching', 'needs_attention', 'empty_batch', ${sqlValue(now)} WHERE changes()>0;`,
         ]);
         results.push({ batch_id: listed.id, status: "needs_attention", attempt_id: acquired.attemptId, error_class: "empty_batch" });
         continue;
       }
+      const dispatchAt = dispatchNow().toISOString();
+      if (!this.bindingStillCurrent(resolved.binding, dispatchAt)) {
+        this.db.transaction([
+          `UPDATE outbox_attempts SET state='failed', finished_at=${sqlValue(dispatchAt)}, error_class='stale_generation', error_message='binding changed before dispatch' WHERE id=${sqlValue(acquired.attemptId)} AND state='leased';`,
+          `UPDATE batches SET state='retry_wait', not_before=${sqlValue(addMs(dispatchAt, this.config.retry_delay_ms!))}, lease_expires_at=NULL, updated_at=${sqlValue(dispatchAt)}, last_error='stale_generation' WHERE id=${sqlValue(listed.id)} AND state='dispatching' AND last_error=${sqlValue(acquired.attemptId)};`,
+          `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at) SELECT ${sqlValue(listed.id)}, 'dispatching', 'retry_wait', 'stale_generation', ${sqlValue(dispatchAt)} WHERE changes()>0;`,
+        ]);
+        results.push({ batch_id: listed.id, status: "stale_generation", attempt_id: acquired.attemptId, endpoint_id: resolved.binding.endpoint_id, generation: resolved.binding.generation, error_class: "stale_generation" });
+        continue;
+      }
       const deliveryNonce = randomBytes(24).toString("base64url");
       if (transport.capabilities?.session_activity_observable) {
-        const correlationCreatedAt = this.nowIso();
+        const correlationCreatedAt = dispatchNow().toISOString();
         this.db.transaction([
           `INSERT INTO delivery_correlations(attempt_id, batch_id, endpoint_id, binding_generation, transport_kind, nonce_hash, state, created_at, expires_at, consumed_at)
            VALUES(${sqlValue(acquired.attemptId)}, ${sqlValue(acquired.batch.id)}, ${sqlValue(resolved.binding.endpoint_id)}, ${resolved.binding.generation}, ${sqlValue(transport.kind)}, ${sqlValue(sha256(deliveryNonce))}, 'outstanding', ${sqlValue(correlationCreatedAt)}, ${sqlValue(addMs(correlationCreatedAt, 60 * 60_000))}, NULL);`,
@@ -1832,7 +2027,7 @@ export class WakeBridge {
       // A transport may legitimately remain open for minutes. Retry windows,
       // receipts and transitions must be based on completion time, not the
       // timestamp captured before the network/provider turn began.
-      const finalizedAt = this.nowIso();
+      const finalizedAt = dispatchNow().toISOString();
       const final = this.finalizeAttempt(acquired.attemptId, acquired.batch, resolved.binding, transportResult, transport.kind, finalizedAt);
       final.endpoint_id = resolved.binding.endpoint_id;
       final.generation = resolved.binding.generation;
@@ -1846,21 +2041,28 @@ export class WakeBridge {
       VALUES(${sqlValue(receipt.id)}, ${sqlValue(receipt.batch_id)}, ${sqlValue(receipt.claim_id)}, ${sqlValue(receipt.stage)}, ${sqlValue(receipt.at)}, ${sqlValue(receipt.endpoint_id)}, ${sqlValue(receipt.binding_generation)}, ${sqlValue(receipt.transport_kind)}, ${sqlJson(receipt.details)});`;
   }
 
-  private detachClaimFromOpenBatches(claim: AttentionClaim, now: string): string[] {
-    const statements: string[] = [];
-    for (const batch of this.batchesContainingClaim(claim.id, OPEN_BATCH_STATES)) {
-      const claimIds = batch.claim_ids.filter((idValue) => idValue !== claim.id);
-      const eventIds = arrayWithoutDuplicates(batch.event_ids.filter((eventId) => !claim.event_ids.includes(eventId) || claimIds.some((otherClaimId) => this.getClaim(otherClaimId)?.event_ids.includes(eventId))));
-      if (claimIds.length) {
-        statements.push(...this.batchUpdateArraysSql(batch, claimIds, eventIds, now));
-      } else {
-        statements.push(
-          `UPDATE batches SET claim_ids_json='[]', event_ids_json='[]', state='cancelled', updated_at=${sqlValue(now)}, last_error='all_claims_finalized' WHERE id=${sqlValue(batch.id)} AND state IN ('pending','waiting_for_endpoint','retry_wait');`,
-          `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at) SELECT ${sqlValue(batch.id)}, ${sqlValue(batch.state)}, 'cancelled', 'all_claims_finalized', ${sqlValue(now)} FROM batches WHERE id=${sqlValue(batch.id)} AND changes()>0;`,
-        );
-      }
-    }
-    return statements;
+  private detachClaimFromOpenBatches(claimId: string, state: ClaimState, now: string, snoozeUntil: string | null): string[] {
+    const claimFence = `EXISTS (SELECT 1 FROM claims WHERE id=${sqlValue(claimId)} AND state=${sqlValue(state)}${snoozeUntil == null ? "" : ` AND snooze_until=${sqlValue(snoozeUntil)} AND eligible_after=${sqlValue(snoozeUntil)}`})`;
+    const predicate = `instance_id=${sqlValue(this.config.instance_id)} AND state IN (${OPEN_BATCH_STATES.map(sqlValue).join(",")})
+      AND EXISTS (SELECT 1 FROM json_each(batches.claim_ids_json) WHERE value=${sqlValue(claimId)}) AND ${claimFence}`;
+    const emptied = "json_array_length(claim_ids_json)=1";
+    const reason = snoozeUntil == null ? "all_claims_finalized" : "all_claims_snoozed";
+    // Inspect and filter the arrays under the transaction lock. Other claims
+    // may have joined the batch since the action's pre-read.
+    return [
+      `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
+       SELECT id, state, CASE WHEN ${emptied} THEN 'cancelled' ELSE state END,
+         CASE WHEN ${emptied} THEN ${sqlValue(reason)} ELSE 'detach_claim' END, ${sqlValue(now)} FROM batches WHERE ${predicate};`,
+      `UPDATE batches SET event_ids_json=CASE WHEN ${emptied} THEN '[]' ELSE (
+          SELECT json_group_array(j.value) FROM json_each(batches.event_ids_json) j
+          WHERE NOT EXISTS (SELECT 1 FROM claims c, json_each(c.event_ids_json) own WHERE c.id=${sqlValue(claimId)} AND own.value=j.value)
+            OR EXISTS (SELECT 1 FROM json_each(batches.claim_ids_json) other JOIN claims c ON c.id=other.value, json_each(c.event_ids_json) ref
+              WHERE other.value<>${sqlValue(claimId)} AND ref.value=j.value)
+        ) END,
+        claim_ids_json=(SELECT json_group_array(value) FROM json_each(batches.claim_ids_json) WHERE value<>${sqlValue(claimId)}),
+        state=CASE WHEN ${emptied} THEN 'cancelled' ELSE state END,
+        last_error=CASE WHEN ${emptied} THEN ${sqlValue(reason)} ELSE last_error END, updated_at=${sqlValue(now)} WHERE ${predicate};`,
+    ];
   }
 
   /** Unbounded unless `limit` is given; `newest_first` then keeps the most recent rows, still in order. */
@@ -1972,15 +2174,17 @@ export class WakeBridge {
     // which is the most recent batch when a snoozed claim was re-batched.
     const batch = this.batchesContainingClaim(claimId).at(-1);
     const statements = [
-      `UPDATE claims SET state=${sqlValue(nextState)}, eligible_after=${sqlValue(action === "snooze" ? String(value) : claim.eligible_after)}, snooze_until=${sqlValue(action === "snooze" ? String(value) : null)}, consumed_result_json=${sqlJson(action === "consume" ? value : null)}, dismissed_reason=${sqlValue(action === "dismiss" ? String(value || "dismissed") : null)}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(claimId)} AND state=${sqlValue(claim.state)};`,
+      `UPDATE claims SET state=${sqlValue(nextState)}, eligible_after=${sqlValue(action === "snooze" ? String(value) : claim.eligible_after)}, snooze_until=${sqlValue(action === "snooze" ? String(value) : null)}, consumed_result_json=${sqlJson(action === "consume" ? value : null)}, dismissed_reason=${sqlValue(action === "dismiss" ? String(value || "dismissed") : null)}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(claimId)} AND state=${sqlValue(claim.state)} AND eligible_after=${sqlValue(claim.eligible_after)} AND snooze_until IS ${sqlValue(claim.snooze_until)};`,
       `INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT ${sqlValue(claimId)}, ${sqlValue(claim.state)}, ${sqlValue(nextState)}, ${sqlValue(action)}, ${sqlValue(now)} WHERE changes()>0;`,
     ];
-    statements.push(...this.detachClaimFromOpenBatches(claim, now));
-    if (action !== "snooze") {
-      for (const eventId of claim.event_ids) statements.push(...this.eventStateSql(eventId, "consumed", now, action));
-    }
     if (batch && action !== "snooze") {
-      statements.push(this.receiptInsertSql({ id: id("rcpt"), batch_id: batch.id, claim_id: claimId, stage: "agent_consumed", at: now, endpoint_id: null, binding_generation: null, transport_kind: null, details: action === "dismiss" ? { reason: String(value || "dismissed") } : { result: (value as JsonValue) ?? null } }));
+      const details = action === "dismiss" ? { reason: String(value || "dismissed") } : { result: (value as JsonValue) ?? null };
+      statements.push(`INSERT INTO receipts(id, batch_id, claim_id, stage, at, endpoint_id, binding_generation, transport_kind, details_json)
+        SELECT ${sqlValue(id("rcpt"))}, ${sqlValue(batch.id)}, ${sqlValue(claimId)}, 'agent_consumed', ${sqlValue(now)}, NULL, NULL, NULL, ${sqlJson(details)} WHERE changes()>0;`);
+    }
+    statements.push(...this.detachClaimFromOpenBatches(claimId, nextState, now, action === "snooze" ? String(value) : null));
+    if (action !== "snooze") {
+      statements.push(...this.claimEventStateSql(claimId, nextState, "consumed", now, action));
     }
     this.db.transaction(statements);
     return this.getClaim(claimId)!;

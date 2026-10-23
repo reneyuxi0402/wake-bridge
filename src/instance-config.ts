@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { WakeBridge, BridgeError } from "./core.js";
-import type { BridgeConfig } from "./types.js";
+import type { BridgeConfig, QuietHoursConfig } from "./types.js";
 import { MIN_SECRET_LENGTH, SOURCE_ID as INSTANCE_ID } from "./validation.js";
 
 export interface WakeBridgeInstanceConfigFile {
@@ -19,6 +19,7 @@ export interface WakeBridgeInstanceConfigFile {
   owner_id: string;
   db_path: string;
   timezone: string;
+  quiet_hours?: QuietHoursConfig | null;
   admin_token: string;
   ack_timeout_ms?: number;
   incident_attention_channel?: string;
@@ -204,6 +205,7 @@ export function bridgeConfigFromFile(path: string): BridgeConfig {
     owner_id: config.owner_id,
     db_path: config.db_path,
     timezone: config.timezone,
+    ...(config.quiet_hours === undefined ? {} : { quiet_hours: config.quiet_hours }),
     admin_token: config.admin_token,
     ...(config.ack_timeout_ms === undefined ? {} : { ack_timeout_ms: config.ack_timeout_ms }),
     ...(config.incident_attention_channel === undefined ? {} : { incident_attention_channel: config.incident_attention_channel }),

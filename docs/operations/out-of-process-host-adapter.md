@@ -1,13 +1,13 @@
 # Out-of-process local Host Adapter protocol
 
 状态：current public Host Adapter Contract。所有具体 host/product support 由 adapter 维护者按 host/version 独立声明；
-Wake Bridge package 本身不内置产品支持。
+通用 contract 不代表任意产品受支持；随包的实验性 [Claude online adapter](../../host-adapters/claude-cli/README.md) 有独立且有限的验证范围。
 
 这个协议面向已经有 backend agent session、bridge service 或自建 frontend 的宿主。外部 service 保管宿主身份与内部 credential，
 Wake Bridge daemon 只知道一个 opaque session、声明的 capability 与精确 loopback delivery route。
 
 它不是动态 plugin loader。Daemon 不 import 第三方代码，也不把 Core、DB、owner token 或 agent memory 交给 adapter。具体宿主实现仍是
-仓库外 integration；通过该协议不等于该宿主进入 Wake Bridge supported-host matrix。
+独立 integration；通过该协议不等于该宿主进入 Wake Bridge supported-host matrix。
 
 ## 1. Operator 配置
 
@@ -131,6 +131,21 @@ Body 使用 `LOCAL_HOST_PROTOCOL_VERSION=1`：
 Transport 使用有界 timeout、拒绝 redirects，只连接 `127.0.0.1` 或 `::1`。公网 URL、带 userinfo/path/query 的 origin 均在登记前
 拒绝。
 
+### 接收不是整轮处理完成
+
+`202` 的前提是声明的精确 session pipe/host 已真实接受 envelope，不是 HTTP handler 已启动，也不是准备稍后尝试注入。
+优先调用宿主已有的接收/排队 primitive，在其确认接受后响应；宿主已有可靠接收机制时不需要另建耐久队列。
+若现有同步接口要等 agent 完整回答才返回，应先找到真实接收边界，而不是让投递请求等待完整工作，或 catch timeout 后改回 202。
+单纯延长 timeout 也不能提供接收证明。
+
+每个 adapter reference 可设置 `timeout_ms`（100–30000 毫秒，默认 5000）；这是等待接受响应的预算，不是等待
+agent 完整工作的时限。可重试失败的默认节奏与 `retry_after_ms` 边界见 [operator control](operator-control.md#retryable-transport-failure)。
+
+请求超时/响应丢失时，Core 没有 HTTP 接受证据，但宿主可能已经接收；不要据此断言未投递，也不要自动 ack/consume。
+Core retry 会创建新的 `attempt_id`。同 attempt 的进程内去重不足以防止跨 retry 或 adapter 重启后的重复业务投递；
+按宿主现有能力使用稳定 wake/claim 标识做幂等处理，并明确其范围，不宣称跨重启 exactly-once。没有可确认的接受机制时，应保留失败/未知证据。
+若 host 确实观察到该次 delivery 注入相同 session/generation，可使用下一节的现有 nonce echo；不能凭 handler 收到请求或 agent 正在运行伪造 echo。
+
 ## 4. Activity 与更高层 receipt
 
 若 manifest 声明 `foreground_presence_observable`，adapter 必须只在真实用户 active edge 上调用
@@ -147,6 +162,23 @@ agent 理解、消费或执行了其中工作。agent 随后显式 `attention_ac
 nonce echo 可以和原 transport request 并发发生：若 host 已证明注入，但 HTTP 202 回程超时，Core 以更强的 host 证明收尾，避免
 误重投。nonce、endpoint、binding generation 与 attempt 任一不匹配都会 fail closed；不存在可由 adapter 任意指定 batch id 的 ack
 入口。
+
+### Agent 的确认顺序与竞态
+
+Agent 实际读到 envelope 后调用 MCP：
+
+```json
+{"wake_batch_id":"wb_..."}
+```
+
+这是 `attention_ack` 的参数；不要附加 endpoint、generation、nonce 或 source。随后用 agent 自己的授权来源工具读取 resource，
+审阅/处理完某条 claim 后才调用 `attention_consume({"claim_id":"ac_..."})`。Adapter 不替 agent 确认理解或完成工作，
+也不能为消除告警而自动调用这两个工具。`consumeWakeEcho()` 只是 host 注入证明，不是 `attention_ack` 的替代。
+
+Agent 可能先于 Core 落地 accepted attempt 调用 ack，此时可得到 `409 batch_not_dispatched`。先用
+`attention_wake_health({"batch_id":"wb_..."})` 核对同 batch 的接受证据；确认当前投递已被接受后，agent 可重试同一个 ack，成功后重复 ack 是幂等的。
+不要吞掉 409，也不要对全部 409 无限重试：`stale_generation` 等 fencing 失败应核对精确 session、当前 binding 与 takeover，
+其他状态冲突按实际错误定位，不要用新 session 给旧投递补虚假确认。
 
 自 preview.10 起，Core 默认在接受投递 30 分钟后仍无 agent ack 时标记 `needs_attention` / `ack_timeout`，而不是重新发送已接受的
 delivery。该时限可由 operator 配置；合法的迟到 agent ack 或当前 attempt 的 nonce echo 仍可收尾，但 generation fencing 不变；batch 的全部 claim 都被

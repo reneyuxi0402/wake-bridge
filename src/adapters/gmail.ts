@@ -50,8 +50,8 @@ export interface GmailNotificationClient {
     start_history_id: string;
     page_token: string | null;
     max_results: number;
-  }): Promise<GmailHistoryPage> | GmailHistoryPage;
-  messageMetadata(messageId: string): Promise<GmailMessageMetadata> | GmailMessageMetadata;
+  }, signal?: AbortSignal): Promise<GmailHistoryPage> | GmailHistoryPage;
+  messageMetadata(messageId: string, signal?: AbortSignal): Promise<GmailMessageMetadata> | GmailMessageMetadata;
 }
 
 interface GmailCursor {
@@ -191,11 +191,14 @@ export class GmailSourceAdapter implements PullSourceAdapter {
       throw new BridgeError("gmail poll limit is invalid", "invalid_source_poll", 400);
     }
     const cursor = gmailCursor(context.cursor);
+    // Return partial progress before Core's 15s connector timeout.
+    // One budget covers history, OAuth and all metadata.
+    const signal = AbortSignal.timeout(10_000);
     const page = await this.client.history({
       start_history_id: cursor.history_id,
       page_token: cursor.page_token,
       max_results: GMAIL_MAX_PAGE_SIZE,
-    });
+    }, signal);
     const messages = historyMessages(validateHistoryPage(page));
     if (cursor.message_offset > messages.length) {
       throw new BridgeError("gmail cursor offset is outside the provider page", "invalid_source_cursor", 400);
@@ -203,16 +206,20 @@ export class GmailSourceAdapter implements PullSourceAdapter {
 
     const events: WakeEventInput[] = [];
     let offset = cursor.message_offset;
-    while (offset < messages.length && events.length < context.limit) {
+    while (offset < messages.length && offset - cursor.message_offset < context.limit) {
       const reference = messages[offset];
-      offset += 1;
       let message: GmailMessageMetadata;
       try {
-        message = await this.client.messageMetadata(reference.message_id);
+        signal.throwIfAborted();
+        message = await this.client.messageMetadata(reference.message_id, signal);
       } catch (error) {
-        if (error instanceof BridgeError && error.code === "gmail_message_not_found") continue;
+        if (error instanceof BridgeError && error.code === "gmail_message_not_found") { offset += 1; continue; }
+        // Only completed candidates advance the cursor. With no progress,
+        // surface the failure instead of returning a successful empty page.
+        if (signal.aborted && offset > cursor.message_offset) break;
         throw error;
       }
+      offset += 1;
       const labels = Array.isArray(message.labelIds) ? message.labelIds : [];
       if (!labels.includes("INBOX") || labels.includes("DRAFT")) continue;
       events.push(gmailEvent(reference, message, this.attentionChannel, this.now));

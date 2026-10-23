@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { WakeBridge } from "../src/core.js";
 import { startDaemon } from "../src/daemon.js";
+import { SourceControlStore } from "../src/source-adapter.js";
 import {
   loadSourceConnectorFile,
   SourceSupervisor,
@@ -106,6 +107,25 @@ async function fixtureConnector(token: string): Promise<{
 
 describe("owner-controlled source connector", () => {
   const adminToken = "admin-token-0123456789abcdef0123456789";
+  it("preserves legacy file defaults while durable enable/disable takes precedence across reopen", () => {
+    const config = { instance_id: "source-defaults", owner_id: "owner", db_path: temporary("bridge.sqlite") };
+    const source = { id: "fixture-notifications", base_url: "http://127.0.0.1:4391", token_env: "FIXTURE_TOKEN" };
+    const bridge = new WakeBridge(config);
+    try {
+      expect(new SourceSupervisor(bridge, [source]).list()[0]).toMatchObject({ enabled: true, state: "idle" });
+      expect(new SourceSupervisor(bridge, [{ ...source, enabled: false }]).list()[0]).toMatchObject({ enabled: false, state: "stopped" });
+      const controls = new SourceControlStore(bridge);
+      controls.set(source.id, false);
+      expect(new SourceSupervisor(bridge, [{ ...source, enabled: true }]).list()[0].enabled).toBe(false);
+      controls.set(source.id, true);
+    } finally { bridge.close(); }
+    const reopened = new WakeBridge(config);
+    try {
+      expect(new SourceSupervisor(reopened, [{ ...source, enabled: false }]).list()[0].enabled).toBe(true);
+      expect(reopened.listEvents()).toEqual([]);
+    } finally { reopened.close(); }
+  });
+
   it("keeps the provider outside Wake Bridge, drains bounded pages, and persists only event facts plus cursor", async () => {
     const connectorToken = "fixture-connector-token";
     const connector = await fixtureConnector(connectorToken);

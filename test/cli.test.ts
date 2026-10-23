@@ -7,6 +7,8 @@ import { WakeBridge } from "../src/core.js";
 import { initializeInstance } from "../src/instance-config.js";
 import type { TransportResult, WakeTransport } from "../src/types.js";
 
+const CLI = ["dist/src/cli.js"];
+
 class CliPermanentFailure implements WakeTransport {
   readonly kind = "cli_failure";
   dispatch(): TransportResult {
@@ -19,7 +21,7 @@ describe("Wake Bridge CLI", () => {
     const dir = mkdtempSync(join(tmpdir(), "wake-bridge-cli-unknown-"));
     const db = join(dir, "must-not-exist.sqlite");
     try {
-      const result = spawnSync(process.execPath, ["dist/src/cli.js", "old-product-host-command"], {
+      const result = spawnSync(process.execPath, [...CLI, "old-product-host-command"], {
         cwd: process.cwd(),
         env: { ...process.env, WAKEBRIDGE_DB: db, WAKEBRIDGE_INSTANCE_ID: "i", WAKEBRIDGE_OWNER_ID: "o" },
         encoding: "utf8",
@@ -42,7 +44,7 @@ describe("Wake Bridge CLI", () => {
     };
     try {
       const removed = spawnSync(process.execPath, [
-        "dist/src/cli.js", "endpoint-register",
+        ...CLI, "endpoint-register",
         "--host-kind", "mock",
         "--session-ref", "legacy",
         "--cold-routes", "[]",
@@ -51,7 +53,7 @@ describe("Wake Bridge CLI", () => {
       expect(removed.stderr).toContain("--cold-routes has been removed; use --routes");
 
       const current = spawnSync(process.execPath, [
-        "dist/src/cli.js", "endpoint-register",
+        ...CLI, "endpoint-register",
         "--host-kind", "mock",
         "--session-ref", "current",
         "--routes", '[{"kind":"mock","address":{}}]',
@@ -67,6 +69,26 @@ describe("Wake Bridge CLI", () => {
     }
   });
 
+  it("rejects a pre-RETURNING SQLite version even when JSON checks pass", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wake-bridge-cli-sqlite-version-"));
+    writeFileSync(join(dir, "sqlite3"), [
+      "#!/bin/sh",
+      'if [ "$1" = "--version" ]; then echo "3.34.1 test"; exit 0; fi',
+      'input=$(cat)',
+      'case "$input" in *json_each*) echo \'[{"ok":1,"rows":2}]\';; *) echo \'[{"ok":1}]\';; esac',
+      "",
+    ].join("\n"), { mode: 0o755 });
+    try {
+      const result = spawnSync(process.execPath, [...CLI, "release-preflight"], {
+        cwd: process.cwd(), env: { ...process.env, PATH: `${dir}:${process.env.PATH}` }, encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(2);
+      expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, runtime: { sqlite3: {
+        installed_version: "3.34.1", minimum_version: "3.35.0", supported: false, json_output: true, json_functions: true,
+      } } });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("fails release-preflight when the SQLite CLI has JSON output but no JSON1 functions", () => {
     const dir = mkdtempSync(join(tmpdir(), "wake-bridge-cli-sqlite-"));
     // A pre-3.38 CLI built without JSON1: `-json` output works, json_each does not.
@@ -80,7 +102,7 @@ describe("Wake Bridge CLI", () => {
     ].join("\n"));
     chmodSync(join(dir, "sqlite3"), 0o755);
     try {
-      const result = spawnSync(process.execPath, ["dist/src/cli.js", "release-preflight"], {
+      const result = spawnSync(process.execPath, [...CLI, "release-preflight"], {
         cwd: process.cwd(),
         env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
         encoding: "utf8",
@@ -99,15 +121,15 @@ describe("Wake Bridge CLI", () => {
     const dir = mkdtempSync(join(tmpdir(), "wake-bridge-cli-prune-"));
     const env = { ...process.env, WAKEBRIDGE_DB: join(dir, "bridge.sqlite"), WAKEBRIDGE_INSTANCE_ID: "i", WAKEBRIDGE_OWNER_ID: "o" };
     try {
-      const missing = spawnSync(process.execPath, ["dist/src/cli.js", "prune"], { cwd: process.cwd(), env, encoding: "utf8" });
+      const missing = spawnSync(process.execPath, [...CLI, "prune"], { cwd: process.cwd(), env, encoding: "utf8" });
       expect(missing.status).toBe(1);
       expect(missing.stderr).toContain("older_than_days must be an integer");
 
-      const preview = spawnSync(process.execPath, ["dist/src/cli.js", "prune", "--older-than-days", "30"], { cwd: process.cwd(), env, encoding: "utf8" });
+      const preview = spawnSync(process.execPath, [...CLI, "prune", "--older-than-days", "30"], { cwd: process.cwd(), env, encoding: "utf8" });
       expect(preview.status).toBe(0);
       expect(JSON.parse(preview.stdout)).toMatchObject({ applied: false, deleted: { batches: 0, claims: 0 } });
 
-      const applied = spawnSync(process.execPath, ["dist/src/cli.js", "prune", "--older-than-days", "30", "--apply"], { cwd: process.cwd(), env, encoding: "utf8" });
+      const applied = spawnSync(process.execPath, [...CLI, "prune", "--older-than-days", "30", "--apply"], { cwd: process.cwd(), env, encoding: "utf8" });
       expect(applied.status).toBe(0);
       expect(JSON.parse(applied.stdout)).toMatchObject({ applied: true });
     } finally {
@@ -116,15 +138,16 @@ describe("Wake Bridge CLI", () => {
   });
 
   it("reports the public Host Adapter contract without claiming product-host support", () => {
-    const result = spawnSync(process.execPath, ["dist/src/cli.js", "doctor"], {
+    const result = spawnSync(process.execPath, [...CLI, "doctor"], {
       cwd: process.cwd(), env: process.env, encoding: "utf8",
     });
-    expect(result.status).toBe(0);
-    const hosts = JSON.parse(result.stdout).hosts;
+    const report = JSON.parse(result.stdout);
+    expect(result.status).toBe(report.ok ? 0 : 2);
+    const hosts = report.hosts;
     expect(hosts).toMatchObject({
       contract: {
         protocol: "out_of_process_loopback_v1",
-        product_hosts_bundled: false,
+        product_hosts_bundled: true,
       },
       configured_adapters: { configured: false, adapter_count: 0, adapters: [] },
     });
@@ -132,7 +155,7 @@ describe("Wake Bridge CLI", () => {
   });
 
   it("lists a secret-free Source Connector catalog without enabling connectors by default", () => {
-    const result = spawnSync(process.execPath, ["dist/src/cli.js", "connector-catalog"], {
+    const result = spawnSync(process.execPath, [...CLI, "connector-catalog"], {
       cwd: process.cwd(), env: process.env, encoding: "utf8",
     });
     expect(result.status).toBe(0);
@@ -153,7 +176,7 @@ describe("Wake Bridge CLI", () => {
     const root = mkdtempSync(join(tmpdir(), "wake-bridge-cli-init-"));
     const dataDir = join(root, "agent-space");
     const args = [
-      "dist/src/cli.js", "init",
+      ...CLI, "init",
       "--data-dir", dataDir,
       "--instance-id", "agent-a",
       "--owner-id", "agent-a-owner",
@@ -185,7 +208,7 @@ describe("Wake Bridge CLI", () => {
         expect(statSync(result.db_path).mode & 0o777).toBe(0o600);
       }
 
-      const doctor = spawnSync(process.execPath, ["dist/src/cli.js", "doctor", "--config", result.config_path], {
+      const doctor = spawnSync(process.execPath, [...CLI, "doctor", "--config", result.config_path], {
         cwd: process.cwd(), env: cleanEnv, encoding: "utf8",
       });
       expect(doctor.status).toBe(0);
@@ -204,7 +227,7 @@ describe("Wake Bridge CLI", () => {
       expect(repeated.stderr).toContain("instance config already exists");
       expect(JSON.parse(readFileSync(result.config_path, "utf8")).admin_token).toBe(stored.admin_token);
 
-      const rotated = spawnSync(process.execPath, ["dist/src/cli.js", "owner-token-rotate", "--config", result.config_path], {
+      const rotated = spawnSync(process.execPath, [...CLI, "owner-token-rotate", "--config", result.config_path], {
         cwd: process.cwd(), env: cleanEnv, encoding: "utf8",
       });
       expect(rotated.status).toBe(0);
@@ -215,18 +238,18 @@ describe("Wake Bridge CLI", () => {
       if (process.platform !== "win32") expect(statSync(result.config_path).mode & 0o777).toBe(0o600);
 
       const overridden = spawnSync(process.execPath, [
-        "dist/src/cli.js", "doctor", "--config", result.config_path, "--owner-id", "someone-else",
+        ...CLI, "doctor", "--config", result.config_path, "--owner-id", "someone-else",
       ], { cwd: process.cwd(), env: cleanEnv, encoding: "utf8" });
-      expect(overridden.status).toBe(0);
+      expect(overridden.status).toBe(2);
       expect(JSON.parse(overridden.stdout)).toMatchObject({ ok: false, security: { owner_api_authenticated: false } });
       expect(JSON.parse(overridden.stdout).security.config_load_error).toContain("cannot override the fixed Agent Space config");
 
       if (process.platform !== "win32") {
         chmodSync(result.config_path, 0o644);
-        const insecure = spawnSync(process.execPath, ["dist/src/cli.js", "doctor", "--config", result.config_path], {
+        const insecure = spawnSync(process.execPath, [...CLI, "doctor", "--config", result.config_path], {
           cwd: process.cwd(), env: cleanEnv, encoding: "utf8",
         });
-        expect(insecure.status).toBe(0);
+        expect(insecure.status).toBe(2);
         expect(JSON.parse(insecure.stdout)).toMatchObject({
           ok: false,
           security: { owner_api_authenticated: false, config_file: { configured: true, ready: false } },
@@ -264,7 +287,7 @@ describe("Wake Bridge CLI", () => {
       const batch = bridge.listBatches()[0];
       bridge.close();
 
-      const status = spawnSync(process.execPath, ["dist/src/cli.js", "status", "--config", initialized.config_path], {
+      const status = spawnSync(process.execPath, [...CLI, "status", "--config", initialized.config_path], {
         cwd: process.cwd(), encoding: "utf8",
       });
       expect(status.status).toBe(2);
@@ -276,7 +299,7 @@ describe("Wake Bridge CLI", () => {
       expect(status.stdout).not.toContain("cli-secret-session");
 
       const retry = spawnSync(process.execPath, [
-        "dist/src/cli.js", "batch-retry", batch.id,
+        ...CLI, "batch-retry", batch.id,
         "--config", initialized.config_path,
         "--expected-attempt", "1",
         "--reason", "operator repaired route",
@@ -284,7 +307,7 @@ describe("Wake Bridge CLI", () => {
       expect(retry.status, retry.stderr).toBe(0);
       expect(JSON.parse(retry.stdout)).toMatchObject({ retried: true, batch: { state: "retry_wait", attempt: 1 } });
 
-      const after = spawnSync(process.execPath, ["dist/src/cli.js", "status", "--config", initialized.config_path], {
+      const after = spawnSync(process.execPath, [...CLI, "status", "--config", initialized.config_path], {
         cwd: process.cwd(), encoding: "utf8",
       });
       expect(after.status).toBe(0);

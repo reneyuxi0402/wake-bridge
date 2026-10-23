@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -166,6 +166,51 @@ describe("release lifecycle", () => {
     }
   });
 
+  it("passes macOS service files without copying secrets and quotes the load command", () => {
+    const current = fixture();
+    try {
+      const environmentFile = join(current.root, "host env ' & $.conf");
+      const paths = ["host adapters", "connectors", "source credentials"].map((name) => join(current.root, `${name} &.json`));
+      const cliPath = join(current.root, "fixture cli &.mjs");
+      writeFileSync(environmentFile, "WAKEBRIDGE_SERVICE_TEST_SECRET=private-value\n", { mode: 0o600 });
+      for (const path of paths) writeFileSync(path, "{}\n", { mode: 0o600 });
+      writeFileSync(cliPath, 'process.stdout.write(JSON.stringify({args:process.argv.slice(2),secret:process.env.WAKEBRIDGE_SERVICE_TEST_SECRET}));\n');
+      const service = installMacLaunchAgent({
+        config_path: current.config,
+        launch_agents_directory: join(current.root, "Launch Agents ' & $"),
+        environment_file: environmentFile,
+        host_adapters_path: paths[0], source_connectors_path: paths[1], source_credentials_path: paths[2],
+        cli_path: cliPath,
+      }, { platform: "darwin" });
+      const plist = readFileSync(service.plist_path, "utf8");
+      expect(plist).not.toContain("private-value");
+      const array = plist.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/u)![1];
+      const argv = [...array.matchAll(/<string>(.*?)<\/string>/gu)].map((match) => match[1]
+        .replaceAll("&apos;", "'").replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&"));
+      const run = JSON.parse(execFileSync(argv[0], argv.slice(1), { encoding: "utf8" }));
+      expect(run.secret).toBe("private-value");
+      expect(run.args).toEqual(["daemon", "--config", realpathSync(current.config), "--host", "127.0.0.1", "--port", "4311",
+        "--host-adapters", realpathSync(paths[0]), "--connectors", realpathSync(paths[1]), "--source-credentials", realpathSync(paths[2])]);
+      // Replace launchctl with a shell function: verify exact argv without loading any service.
+      const commandArgs = execFileSync("bash", ["-c", `launchctl() { printf '%s\\n' "$@"; }; ${service.load_command}`], { encoding: "utf8" }).trim().split("\n");
+      expect(commandArgs).toEqual(["bootstrap", expect.stringMatching(/^gui\//u), service.plist_path]);
+      if (process.platform === "darwin") expect(spawnSync("plutil", ["-lint", service.plist_path]).status).toBe(0);
+    } finally { rmSync(current.root, { recursive: true, force: true }); }
+  });
+
+  it("rejects missing or public macOS service credential files before writing a profile", () => {
+    const current = fixture();
+    try {
+      const launchAgents = join(current.root, "LaunchAgents");
+      const options = { config_path: current.config, launch_agents_directory: launchAgents, cli_path: resolve("src/cli.ts") };
+      expect(() => installMacLaunchAgent({ ...options, host_adapters_path: join(current.root, "missing.json") }, { platform: "darwin" })).toThrow();
+      const environmentFile = join(current.root, "public.env");
+      writeFileSync(environmentFile, "TOKEN=secret\n", { mode: 0o644 });
+      expect(() => installMacLaunchAgent({ ...options, environment_file: environmentFile }, { platform: "darwin" })).toThrow(/must not be accessible/u);
+      expect(existsSync(join(launchAgents, "io.wakebridge.release-test.plist"))).toBe(false);
+    } finally { rmSync(current.root, { recursive: true, force: true }); }
+  });
+
   it("reports Linux readiness and installs a secret-free systemd user service profile", () => {
     const current = fixture();
     try {
@@ -208,7 +253,9 @@ describe("release lifecycle", () => {
       expect(unit).toContain('"--port" "54322"');
       expect(unit).toContain("EnvironmentFile=");
       expect(unit).not.toContain('EnvironmentFile="');
-      expect(unit).toContain("host\\x20env\\x20\\x24%%.conf");
+      expect(unit.split("\n").filter((line) => line.startsWith("EnvironmentFile="))).toEqual([
+        `EnvironmentFile=${realpathSync(environmentFile).replaceAll("%", "%%")}`,
+      ]);
       expect(unit).toContain("wake bridge $$%% cli.js");
       expect(unit).toContain('"--host-adapters"');
       expect(unit).toContain("host adapters $$%%.json");
@@ -245,4 +292,44 @@ describe("release lifecycle", () => {
       rmSync(current.root, { recursive: true, force: true });
     }
   });
+  it.each([
+    ["中文 'single' \"double\" $%.env", "中文 'single' \"double\" $%%.env"],
+    ["glob*?[ab].env", "glob\\*\\?\\[ab\\].env"],
+    ["back\\slash.env", "back\\\\slash.env"],
+  ])("preserves one literal Linux environment file path: %s", (filename, directiveFilename) => {
+    const current = fixture();
+    try {
+      const environmentFile = join(current.root, filename);
+      writeFileSync(environmentFile, "TEST_VALUE=fixture\n", { mode: 0o600 });
+      const service = installLinuxSystemdUserService({
+        config_path: current.config,
+        systemd_user_directory: join(current.root, "systemd", "user"),
+        environment_file: environmentFile,
+        cli_path: resolve("src/cli.ts"),
+      }, { platform: "linux", architecture: "x64" });
+      const unit = readFileSync(service.unit_path, "utf8");
+      expect(unit.split("\n").filter((line) => line.startsWith("EnvironmentFile="))).toEqual([
+        `EnvironmentFile=${join(realpathSync(current.root), directiveFilename)}`,
+      ]);
+      expect(unit).not.toContain("TEST_VALUE=fixture");
+    } finally { rmSync(current.root, { recursive: true, force: true }); }
+  });
+
+  it.each(["line\nbreak.env", "line\rbreak.env", "trailing.env ", "trailing.env\t"])(
+    "rejects an unsafe Linux environment file path without writing a unit: %j", (filename) => {
+      const current = fixture();
+      try {
+        const environmentFile = join(current.root, filename);
+        const systemdUserDirectory = join(current.root, "systemd", "user");
+        writeFileSync(environmentFile, "TEST_VALUE=fixture\n", { mode: 0o600 });
+        expect(() => installLinuxSystemdUserService({
+          config_path: current.config,
+          systemd_user_directory: systemdUserDirectory,
+          environment_file: environmentFile,
+          cli_path: resolve("src/cli.ts"),
+        }, { platform: "linux", architecture: "x64" })).toThrowError(/choose a different path/u);
+        expect(existsSync(join(systemdUserDirectory, "io.wakebridge.release-test.service"))).toBe(false);
+      } finally { rmSync(current.root, { recursive: true, force: true }); }
+    },
+  );
 });

@@ -6,7 +6,7 @@ Date: 2026-09-21; follow-up 2026-09-22. Candidate originally tested as `wake-bri
 
 - Core dependency: published `wake-bridge@0.9.0-preview.10`, unchanged.
 - Local runtime: Node.js 20.20.1 / macOS arm64 / SQLite 3.51.0.
-- Tested Claude CLI: 2.1.270. The stock CLI auto-updater later changed the default binary to 2.1.278; follow-up runs explicitly pinned the retained 2.1.270 binary and set `DISABLE_AUTOUPDATER=1`. No wake compatibility claim is made for 2.1.278.
+- September tested Claude CLI: 2.1.270. The stock CLI auto-updater later changed the default binary to 2.1.278; follow-up runs explicitly pinned the retained 2.1.270 binary and set `DISABLE_AUTOUPDATER=1`. Those runs made no wake compatibility claim for 2.1.278; see the separate October record below.
 - Production Wake Bridge instances, sources, Vinka runtime and existing AI sessions are untouched.
 
 ## Evidence status
@@ -99,6 +99,27 @@ The final interactive matrix was repeated inside a new tmux 3.6a server on a ded
 - The harness exited successfully with all five checks true. Reported session cost was US$0.0300702, bringing the conservative aggregate to **US$0.1790267**, below the US$0.50 authorization.
 
 tmux supplied only terminal persistence. Test setup used `send-keys` for the same synthetic busy-test user prompt that a human would type; Wake Bridge batches themselves arrived exclusively through `notifications/claude/channel`. The dedicated tmux session/socket, temporary Agent Space, debug log and synthetic transcript were removed after recording the result.
+
+## Claude 2.1.278 direct-TTY follow-up (2026-10-22)
+
+This follow-up used the local, unpublished `0.9.0-preview.17` working candidate, including its delivery/configuration fixes, on macOS arm64 / Node.js 20.20.1 / SQLite 3.51.0. It does not certify an already published tarball or another user's deployment. The executable was pinned to 2.1.278 with auto-update disabled; the model was `claude-haiku-4-5-20251001`.
+
+The operator explicitly supplied an existing OAuth credential to the isolated Claude subprocess environment. No credential value was put in argv, the repository or the test prompt, and the adapter did not discover credentials. A separate test config, empty project with synthetic resource files, private Agent Space and loopback ports were used. Cloud-account MCP connectors, skills and automatic memory were disabled. Only the two owner acknowledgement/consumption tools, synthetic-file reads and `Bash(sleep 8)` were pre-authorized; there was no permission bypass. A startup-only attempt without usable authentication made no model requests and cost US$0.
+
+| Check | Observed result |
+| --- | --- |
+| Idle wake | Batch `wb_843f911f-e464-4e49-aadd-816766c983b8` received model-generated `attention_ack`, a successful resource `Read`, then `attention_consume` containing the file's random proof. All four receipt stages were present. |
+| Offline and restart | After Claude exit, a new batch stayed `waiting_for_endpoint` at attempt 0 without a cold launch. Restarting the test daemon against the same database and explicitly launching a new Claude session delivered that same batch, `wb_944f8a8b-4369-4a6b-9a99-aef340328865`, at generation 3; ack/read/consume completed. |
+| Busy, restrictive test instruction | The first busy prompt required only `sleep 8` followed by `BUSY_DONE`. Batch `wb_5726719d-b1de-4cab-8cc7-f261f03e97a0` was accepted while the tool ran and attested after it finished, but the model returned `BUSY_DONE` without ack or consume. **This first busy case did not pass.** |
+| Busy, compatible task instruction | A subsequent user prompt asked for `sleep 8` followed by processing queued wakes. Batch `wb_c76dbecd-499c-4ab8-a1d1-fc5647bdbaa6` was accepted at 07:21:59.485 UTC, during the tool interval 07:21:56.191–07:22:04.224. The model acknowledged at 07:22:06.534, then read and consumed the resource. It also recovered the earlier unacknowledged claim; that recovery does not retroactively make the first busy case pass. |
+| Duplicate schedule | Resubmitting the idle reminder's idempotency key returned `duplicate:true` and the original consumed claim. The final count remained four claims/four batches, each attempt 1. This is schedule deduplication evidence, not a real-host HTTP replay test. |
+| Exit and accounting | Both model sessions exited and their exact leases closed. Final CLI `cost-state` totals were US$0.0307362 and US$0.0364594: **US$0.0671956** combined, below the separately authorized US$0.50 cap. These are reported API-equivalent costs, not a subscription billing claim. |
+
+All four eventual consumption results matched the random proof read from their synthetic files. The harness scheduled work and inspected evidence; it never called ack or consume on the model's behalf. No additional terminal message was used to deliver a wake envelope.
+
+The first busy observation matters: queue delivery and even `host_attested` do not guarantee that a model will honor receipt instructions amid another task. The successful retry used a different user instruction in the same session; it is not a controlled proof that wording was the only cause. Inspect `agent_seen` separately from the batch's `seen` state. Current Core's acknowledgement-timeout recovery selects `dispatched` batches, whereas host attestation can move a batch to `seen`; do not assume that timeout monitoring covers the host-attested/no-agent-ack case. That code-path distinction was inspected, not exercised through the default 30-minute timeout in this UAT.
+
+This follow-up did not test 2.1.278 in detached tmux, non-interactive mode, Linux, a real source connector, or a production service. The adapter remains experimental and the September-only version list in the example manifest is unchanged pending the next release review.
 
 ## Acceptance checklist
 

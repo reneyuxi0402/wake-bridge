@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { ReferenceHostAdapter } from "../examples/reference-host-adapter/adapter.mjs";
 
@@ -23,7 +24,83 @@ async function listen(server) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
+function isolatedAdapter(acceptWake) {
+  return new ReferenceHostAdapter({
+    daemonOrigin: "http://127.0.0.1:4311",
+    hostToken: HOST_TOKEN,
+    routeToken: ROUTE_TOKEN,
+    sessionRef: "exact-session-one",
+    attentionChannel: "life",
+    acceptWake,
+  });
+}
+
+function deliver(adapter, attemptId = "attempt-one") {
+  const delivery = {
+    protocol_version: 1,
+    attempt_id: attemptId,
+    delivery_nonce: "reference-delivery-nonce-0123456789abcdef",
+    wake: {
+      schema_version: 1, instance_id: "reference-instance", wake_batch_id: "wb_reference",
+      attention_channel: "life", claim_refs: [], binding_generation: 1,
+    },
+  };
+  const request = Readable.from([Buffer.from(JSON.stringify(delivery))]);
+  Object.assign(request, {
+    method: "POST", url: "/v1/wakes",
+    headers: { authorization: `Bearer ${ROUTE_TOKEN}`, "x-wakebridge-delivery-nonce": delivery.delivery_nonce },
+  });
+  const statuses = [];
+  const response = { writeHead(status) { statuses.push(status); return this; }, end() {} };
+  return { statuses, done: adapter.handleRequest(request, response) };
+}
+
 describe("reference Host Adapter example", () => {
+  it("does not return 202 before the host acceptance promise resolves", async () => {
+    let release;
+    let entered;
+    const accepting = new Promise((resolve) => { release = resolve; });
+    const called = new Promise((resolve) => { entered = resolve; });
+    const adapter = isolatedAdapter(async () => { entered(); await accepting; });
+    const request = deliver(adapter);
+    await called;
+    expect(request.statuses).toEqual([]);
+    release();
+    await request.done;
+    expect(request.statuses).toEqual([202]);
+  });
+
+  it("returns 503 for rejected acceptance and allows a later attempt to accept", async () => {
+    let calls = 0;
+    const adapter = isolatedAdapter(async () => {
+      if (++calls === 1) throw new Error("host did not accept ownership");
+    });
+    const rejected = deliver(adapter);
+    await rejected.done;
+    expect(rejected.statuses).toEqual([503]);
+    const retry = deliver(adapter);
+    await retry.done;
+    expect(retry.statuses).toEqual([202]);
+    expect(calls).toBe(2);
+  });
+
+  it("dedupes only in one adapter object, not across restart or new attempt ids", async () => {
+    const deliveries = [];
+    const acceptWake = async (delivery) => { deliveries.push(delivery); };
+    const first = isolatedAdapter(acceptWake);
+    await deliver(first).done;
+    await deliver(first).done;
+    expect(deliveries).toHaveLength(1);
+
+    // A fresh process/object has no durable attempt memory, even for the same id.
+    const restarted = isolatedAdapter(acceptWake);
+    await deliver(restarted).done;
+    // Core retries use new ids: even the same object cannot dedupe by batch.
+    await deliver(restarted, "attempt-two").done;
+    expect(deliveries.map((delivery) => delivery.attempt_id)).toEqual(["attempt-one", "attempt-one", "attempt-two"]);
+    expect(new Set(deliveries.map((delivery) => delivery.wake.wake_batch_id)).size).toBe(1);
+  });
+
   it("opens, accepts an attempt once, reports trusted edges, and closes", async () => {
     const lifecycle = [];
     const daemon = createServer(async (request, response) => {

@@ -34,23 +34,25 @@ session 已失活。
 没有 binding 时状态为 `waiting_for_endpoint`。Host Adapter 不具备可信 activity-observer capability 时状态为
 `unsupported`；Bridge 不用进程存在、窗口 focus、模型输出、普通 source event 或 Wake 自己的投递来猜活动。
 
+`enabled: true` 只表示配置已启用，不等于已经 armed。`waiting_for_activity` 表示尚在等待当前 binding generation
+的可信独立活动；bind/takeover 时刻本身不是 baseline，Wake 自身也不能 arm watch。因此它不是启动存活检查或
+endpoint 失联监控：即使已配置，首次独立活动之前也不会开始 idle 计时；投递仍依赖当前可用的 endpoint。
+
 ## 注册 contract
+
+传给 `attention_watch_configure` 的参数示例（状态由返回的 `activity_watch` 单独报告）：
 
 ```json
 {
-  "space_id": "spc_01...",
   "attention_channel": "life",
   "enabled": true,
   "idle_after_seconds": 7200,
-  "trigger": {
-    "mode": "repeat",
-    "repeat_after_seconds": 1800
-  },
-  "state": "armed"
+  "mode": "repeat",
+  "repeat_after_seconds": 1800
 }
 ```
 
-`trigger.mode` 支持：
+`mode` 支持：
 
 - `once`：本次 inactive epoch 只触发一次；
 - `repeat`：只要当前 binding 持续 inactive，就按显式 `repeat_after_seconds` 再触发；真实活动恢复后结束本轮，下一次
@@ -78,29 +80,34 @@ attention_watch_configure(
 
 ## Activity observation
 
-可信 Host Adapter 续 activity lease 时至少提交：
+可信 Host Adapter 使用 endpoint lease 鉴权提交 `ActivityObservation`，例如：
+
+下例省略凭证：HTTP host-session 路由通过 Authorization bearer 接收 endpoint lease token；直接调用 Core
+时需另传 `lease_token`。`HostSessionClient.observeActivity(lease, input)` 会用传入的 lease 完成鉴权。
 
 ```json
 {
-  "space_id": "spc_01...",
   "attention_channel": "life",
   "endpoint_id": "ep_01...",
-  "binding_generation": 12,
+  "generation": 12,
   "observation_id": "act_01...",
   "observed_at": "2026-08-30T12:00:00Z",
-  "lease_expires_at": "2026-08-30T12:01:00Z",
-  "kind": "session_turn",
-  "cause": "independent"
+  "ttl_ms": 60000,
+  "kind": "activity_progress"
 }
 ```
 
 Bridge 只接受当前 binding generation、短时有效且可去重的 observation。Wake runner 的 start/progress/settled、Bridge
 投递、Claim ack/consume/dismiss，以及 source poll 都不是用户或 agent 的独立活动，不能重新开始 idle 计时。
 可信 activity 可以是用户交互，也可以是 harness 观察到的独立 session turn；关键是它发生在该 endpoint 上且
-`cause=independent`，不是本 watch 所触发 Wake 的回声。轮询型 adapter 不一定能看到 turn 的 start edge，因此当前
-generation 的第一条 `activity_progress` 或 `activity_settled` 也可以建立 baseline；`wake_started/progress/settled` 永远
+不是本 watch 所触发 Wake 的回声。独立性由可信 host 的观测语义负责，公开 observation 没有 `cause` 字段。
+轮询型 adapter 不一定能看到 turn 的 start edge，因此当前 generation 的第一条 `activity_progress` 或
+`activity_settled` 也可以建立 baseline；`wake_started/progress/settled` 永远
 不能建立或重置 baseline。Foreground Presence 仍只接受真实用户 active edge，两种
 lease 不应混成同一个语义。
+
+`owner_message_accepted` 是 host 上报的一种活动证据，不是消息审计计数。其覆盖与粒度受 host 能观测到的真实用户
+来源及上报方式限制，不能保证 observation 一行就对应一条用户消息；也不能把任意 session turn 都称为 owner 消息。
 
 ## 触发与幂等
 

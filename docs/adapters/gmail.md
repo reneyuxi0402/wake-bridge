@@ -12,7 +12,8 @@
 - `users.history.list` 固定使用 `historyTypes=messageAdded` 与 `labelId=INBOX`；读取不会 mark read、archive、加标签或发送邮件。
 - 每条候选消息只调用一次 partial `users.messages.get(format=metadata)`，并用 `fields=id,threadId,labelIds,internalDate` 限制返回字段。
 - Event 只保存 message id、thread id 与 `gmail://message/<id>` authoritative resource reference。
-- Gmail opaque `nextPageToken` 与 durable `historyId` 分开保存；一页展开超过 Wake Bridge event limit 时还会保存 page 内 offset。
+- Gmail opaque `nextPageToken` 与 durable `historyId` 分开保存；每轮最多检查 `limit` 条候选（含过滤掉或已删除的邮件），未读完时保存 page 内 offset。
+- 单次 poll 的 history、OAuth 与 metadata 请求共用 10 秒预算，早于 Core 的 15 秒请求超时返回已完成部分。中断的邮件不推进 offset，下轮重读；一条都未完成时仍报错，不伪造成功或跳过邮件。
 - History cursor 返回 404 时进入 `needs_attention`。Connector 不会静默跳到当前 waterline；owner 必须检查离线缺口并显式 rebind。
 - Manifest 如实声明 credential 文件里记录的 OAuth scopes。只有纯 `gmail.metadata` / `gmail.readonly` 被标为 `read_only`；带 `gmail.modify`、settings、send 等 scope 的现有 credential 会标为 `broad`。
 
@@ -40,7 +41,7 @@ manifest 中如实暴露其更宽的权限等级。不要把这两个文件复�
 
 ```sh
 GMAIL_CREDENTIALS_DIR=/absolute/private/gmail-oauth
-WAKEBRIDGE_CONNECTOR_TOKEN=<独立生成的至少32字符本地token>
+WAKEBRIDGE_CONNECTOR_TOKEN='替换为独立生成的至少32字符本地token'
 GMAIL_ATTENTION_CHANNEL=life
 ```
 

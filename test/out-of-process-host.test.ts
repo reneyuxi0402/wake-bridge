@@ -176,7 +176,7 @@ describe("out-of-process local Host Adapter protocol", () => {
     const invalid = spawnSync(process.execPath, [
       "dist/src/cli.js", "doctor", "--config", initialized.config_path, "--host-adapters", path,
     ], { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, WAKEBRIDGE_FIXTURE_HOST_TOKEN: "" } });
-    expect(invalid.status, invalid.stderr).toBe(0);
+    expect(invalid.status, invalid.stderr).toBe(2);
     expect(JSON.parse(invalid.stdout)).toMatchObject({
       ok: false,
       hosts: { configured_adapters: { error: "out-of-process host receipt_upper_bound is required; use accepted_to_live_pipe or host_accepted" } },
@@ -373,5 +373,61 @@ describe("out-of-process local Host Adapter protocol", () => {
     await expect(result(503)).resolves.toMatchObject({ accepted: false, retryable: true, error_class: "host_temporarily_unavailable" });
     await expect(result(400)).resolves.toMatchObject({ accepted: false, retryable: false, error_class: "host_rejected" });
     expect(JSON.stringify(await result(400))).not.toContain("provider secret");
+  });
+
+  it("retries an aborted request with a new attempt id and no fabricated acceptance", async () => {
+    const deliveries: LocalHostDeliveryRequest[] = [];
+    let aborted = false;
+    const adapter = new LocalHttpHostAdapter(manifest(), {
+      timeout_ms: 100,
+      fetch: (async (_input, init) => {
+        deliveries.push(validateLocalHostDeliveryRequest(JSON.parse(String(init?.body))));
+        if (deliveries.length > 1) return new Response(null, { status: 202 });
+        // Model an unknown outcome: the host received the envelope but the
+        // response never arrives. No external network or host UAT is involved.
+        return new Promise<Response>((_resolve, reject) => {
+          init!.signal!.addEventListener("abort", () => {
+            aborted = true;
+            reject(new DOMException("fixture request aborted", "AbortError"));
+          }, { once: true });
+        });
+      }) as typeof fetch,
+    });
+    const dispatch = adapter.dispatch.bind(adapter);
+    const results: Awaited<ReturnType<typeof dispatch>>[] = [];
+    adapter.dispatch = async (context) => {
+      const result = await dispatch(context);
+      results.push(result);
+      return result;
+    };
+    const bridge = new WakeBridge({ ...config(), retry_delay_ms: 0 }, {
+      transports: [adapter], autoMockTransport: false, recoverDispatchLeases: false,
+    });
+    try {
+      const endpoint = bridge.registerEndpoint({
+        host_kind: "fixture_runner", session_ref: "timeout-session", capabilities: manifest().capabilities,
+        routes: [{ kind: adapter.kind, address: { base_url: "http://127.0.0.1:18789/", token: ROUTE_TOKEN } }],
+      });
+      bridge.takeover("life", endpoint.id, 0);
+      bridge.emit("fixture", {
+        type: "external.host.timeout", dedupe_key: "timeout:one", attention_channel_hint: "life",
+        resource: { uri: "fixture://timeout/one" },
+      });
+      bridge.tick();
+      await expect(bridge.dispatchDue()).resolves.toMatchObject([{ status: "retry_wait" }]);
+      expect(aborted).toBe(true);
+      expect(results).toEqual([expect.objectContaining({ accepted: false, retryable: true, error_class: "host_timeout" })]);
+      expect(results[0]).not.toHaveProperty("receipt_details");
+      expect(bridge.listReceipts()).toEqual([]);
+
+      await expect(bridge.dispatchDue()).resolves.toMatchObject([{ status: "accepted" }]);
+      expect(deliveries).toHaveLength(2);
+      expect(deliveries[1].wake.wake_batch_id).toBe(deliveries[0].wake.wake_batch_id);
+      expect(deliveries[1].attempt_id).not.toBe(deliveries[0].attempt_id);
+      expect(bridge.listAttempts().map((attempt) => attempt.state)).toEqual(["failed", "accepted"]);
+      expect(bridge.listReceipts().map((receipt) => receipt.stage)).toEqual(["transport_accepted"]);
+    } finally {
+      bridge.close();
+    }
   });
 });

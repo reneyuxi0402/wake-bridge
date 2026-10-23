@@ -87,6 +87,11 @@ describe("current scheduler semantic conformance", () => {
       ]));
       const emitted = current.emit("legacy", { type: "legacy.event", dedupe_key: "legacy-ignored", resource: { uri: "legacy://ignored" } });
       expect(emitted.event.matched_policy_id).toBe("default");
+      const candidate = [policy("default", 2, "suppress", {})];
+      const previewInput = { type: "legacy.event", dedupe_key: "legacy-preview", resource: { uri: "legacy://preview" } };
+      expect(current.previewPolicy("legacy", previewInput, candidate)).toMatchObject({ matched_policy: { id: "default", version: 2 }, suppressed: true });
+      current.installPolicies(candidate);
+      expect(current.previewPolicy("legacy", previewInput)).toMatchObject({ matched_policy: { id: "default", version: 2 }, suppressed: true });
     } finally {
       current.close();
     }

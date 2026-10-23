@@ -135,7 +135,7 @@ export class GmailRestClient implements GmailNotificationClient {
     this.expiresAt = Number.isFinite(expiry) ? expiry : 0;
   }
 
-  private async token(): Promise<string> {
+  private async token(signal?: AbortSignal): Promise<string> {
     if (this.accessToken && Date.now() < this.expiresAt - 60_000) return this.accessToken;
     let response: Response;
     try {
@@ -148,7 +148,7 @@ export class GmailRestClient implements GmailNotificationClient {
           refresh_token: this.refreshToken,
           grant_type: "refresh_token",
         }),
-        signal: AbortSignal.timeout(15_000),
+        signal: signal ?? AbortSignal.timeout(15_000),
       });
     } catch (error) {
       throw new BridgeError(`gmail token refresh is unavailable: ${error instanceof Error ? error.message : String(error)}`, "gmail_unavailable", 503);
@@ -166,12 +166,12 @@ export class GmailRestClient implements GmailNotificationClient {
     return this.accessToken;
   }
 
-  private async get(path: string, notFoundCode: "gmail_history_expired" | "gmail_message_not_found" | null = null): Promise<Record<string, any>> {
+  private async get(path: string, notFoundCode: "gmail_history_expired" | "gmail_message_not_found" | null = null, signal?: AbortSignal): Promise<Record<string, any>> {
     let response: Response;
     try {
       response = await this.fetcher(`${GMAIL_API}/${path}`, {
-        headers: { authorization: `Bearer ${await this.token()}`, accept: "application/json" },
-        signal: AbortSignal.timeout(20_000),
+        headers: { authorization: `Bearer ${await this.token(signal)}`, accept: "application/json" },
+        signal: signal ?? AbortSignal.timeout(20_000),
       });
     } catch (error) {
       if (error instanceof BridgeError) throw error;
@@ -192,6 +192,9 @@ export class GmailRestClient implements GmailNotificationClient {
     try {
       return await response.json() as Record<string, any>;
     } catch {
+      if (signal?.aborted) {
+        throw new BridgeError("gmail poll deadline exceeded while reading response", "gmail_unavailable", 503);
+      }
       throw new BridgeError("gmail API returned invalid JSON", "invalid_source_page", 502);
     }
   }
@@ -201,7 +204,7 @@ export class GmailRestClient implements GmailNotificationClient {
     return { emailAddress: String(value.emailAddress || ""), historyId: String(value.historyId || "") };
   }
 
-  async history(input: { start_history_id: string; page_token: string | null; max_results: number }): Promise<GmailHistoryPage> {
+  async history(input: { start_history_id: string; page_token: string | null; max_results: number }, signal?: AbortSignal): Promise<GmailHistoryPage> {
     const query = new URLSearchParams({
       startHistoryId: input.start_history_id,
       maxResults: String(Math.min(GMAIL_MAX_PAGE_SIZE, input.max_results)),
@@ -210,16 +213,16 @@ export class GmailRestClient implements GmailNotificationClient {
       fields: "history(id,messagesAdded(message(id,threadId))),nextPageToken,historyId",
     });
     if (input.page_token) query.set("pageToken", input.page_token);
-    return await this.get(`history?${query.toString()}`, "gmail_history_expired") as GmailHistoryPage;
+    return await this.get(`history?${query.toString()}`, "gmail_history_expired", signal) as GmailHistoryPage;
   }
 
-  async messageMetadata(messageId: string): Promise<GmailMessageMetadata> {
+  async messageMetadata(messageId: string, signal?: AbortSignal): Promise<GmailMessageMetadata> {
     const query = new URLSearchParams({
       format: "metadata",
       metadataHeaders: "X-Wake-Bridge-Omitted",
       fields: "id,threadId,labelIds,internalDate",
     });
-    return await this.get(`messages/${encodeURIComponent(messageId)}?${query.toString()}`, "gmail_message_not_found") as GmailMessageMetadata;
+    return await this.get(`messages/${encodeURIComponent(messageId)}?${query.toString()}`, "gmail_message_not_found", signal) as GmailMessageMetadata;
   }
 }
 

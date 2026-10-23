@@ -6,6 +6,8 @@ This adapter is part of the experimental `wake-bridge` npm preview, not a stable
 
 **Verified scope:** real Claude 2.1.270 TTY interactive-session UAT passed idle wake, busy queue delivery, model-generated acknowledgement, exit lease closure and no cold fallback, both directly and inside a fully detached tmux session. Print mode is explicitly rejected (`-p` / `--print`). Long-lived stdin `stream-json` sessions without `-p`, including the Vinka-style flags, also did not process channel notifications on Claude 2.1.270 or 2.1.273 and are unsupported. This is a narrow public preview, not a production deployment; see [the verification record](docs/verification.md).
 
+A 2026-10-22 follow-up tested 2.1.278 in a direct TTY against the unpublished working candidate: idle and restart delivery completed model ack → synthetic resource read → consume. Busy delivery completed with a compatible task instruction, but an earlier restrictive task produced host attestation without model acknowledgement. This is not an unconditional busy-processing guarantee; the [follow-up evidence and limitations](docs/verification.md#claude-21278-direct-tty-follow-up-2026-10-22) retain both observations.
+
 ## Scope
 
 - Start stock Claude through `wakebridge-claude launch`; only that session receives channel notifications.

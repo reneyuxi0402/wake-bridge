@@ -88,7 +88,7 @@ Event 不得携带 provider credential、完整邮件/消息正文或任意模�
       "id": "example-notifications",
       "base_url": "http://127.0.0.1:4391",
       "token_env": "WAKEBRIDGE_SOURCE_EXAMPLE_TOKEN",
-      "enabled": true,
+      "enabled": false,
       "poll_interval_ms": 60000,
       "max_backoff_ms": 900000,
       "limit": 100,
@@ -100,33 +100,42 @@ Event 不得携带 provider credential、完整邮件/消息正文或任意模�
 
 Daemon 用 `WAKEBRIDGE_SOURCE_CONNECTORS_FILE=/absolute/path/sources.json` 读取它。`base_url` 必须是无 path/query/credential 的 loopback HTTP origin。Connector token 只放在 daemon 的 mode-600 env 文件或等价 secret store，不放命令行、配置 JSON、数据库或日志。
 
+`enabled` 是尚无持久控制记录时的文件初值，不是每次启动都覆盖当前控制的开关。Loader 只把显式 `false` 视为停用，
+字段省略会默认启用；首次接入请像示例一样明确写 `false`。一旦 owning agent/operator 通过 enable/disable API 设置过该 source，
+同一 Agent Space DB 的持久控制优先于文件初值，跨 daemon 重启保留。因此把 JSON 改成 `true` 不会覆盖先前持久化的 disable，
+改成 `false` 也不会覆盖先前 enable。启动后以 `attention_source_status` 或 owner-authenticated `GET /v1/sources` 的当前有效状态为准；
+离线 `wakebridge status` 只能查看 durable control，不能证明 live supervisor 正在轮询。不要通过改库或删控制记录切换状态。
+
 安装者只负责提供已安装 connector 槽位和本地运行能力。上游 MCP URL、OAuth 或 API key 由 owning agent 使用 connector/provider 自己的配置机制填写和保管；Wake Bridge 不扫描宿主、shell 或浏览器配置，也不复制、修改这些值。
 
 ## 验证与运行
 
 ```bash
 wakebridge source-validate --connectors /absolute/path/sources.json
+wakebridge_probe_dir="$(mktemp -d)"
 wakebridge source-bootstrap example-notifications \
   --mode from-now \
   --connectors /absolute/path/sources.json \
+  --db "$wakebridge_probe_dir/bridge.sqlite" \
   --expected-subject-ref example:principal:owner-confirmed-id \
-  --expected-binding-fingerprint sha256:<64-lowercase-hex>
+  --expected-binding-fingerprint 'sha256:<64-lowercase-hex>'
 wakebridge source-once example-notifications \
   --connectors /absolute/path/sources.json \
-  --db /private/tmp/wakebridge-source-probe.sqlite
+  --db "$wakebridge_probe_dir/bridge.sqlite"
 wakebridge daemon \
   --config /absolute/path/to/agent-space/wakebridge.config.json \
   --connectors /absolute/path/sources.json
 ```
 
 `source-once` 会真实调用 connector，并把标准化 event/checkpoint 写入指定 DB；它不是“只打印、不落库”的假 dry-run。首次验收应显式使用隔离 DB。状态不是 `healthy` 时命令以非零退出。
+上面 bootstrap 与 source-once 使用同一个新建隔离 DB；替换身份占位符为 verify 的真实值。该 checkpoint 不会自动复制到最后一条命令的正式 Agent Space，正式接入仍须在目标实例停用状态下完成自己的身份核对与 bootstrap。
 
 Agent 日常使用 MCP 自助完成：
 
-1. `attention_source_status` 查看已安装槽位；
+1. `attention_source_status` 查看已安装槽位与有效 enabled 状态；bootstrap/rebind 前必须停用，必要时先 `attention_source_disable({"source":"example-notifications"})`；
 2. 启动自己配置好的 connector 后，调用 `attention_source_verify`；
 3. 首次接入用 `attention_source_bootstrap`，已有错误/旧身份 checkpoint 用 `attention_source_rebind`；两者都必须回传 verify 结果中的准确身份；
-4. 调用 `attention_source_enable` 开始轮询；需要停用时调用 `attention_source_disable`。enable/disable 会持久化并跨 daemon 重启保留。
+4. 验收准备完成后，调用 `attention_source_enable({"source":"example-notifications"})` 受控开始轮询；需要停用时调用 `attention_source_disable`。enable/disable 会持久化并跨 daemon 重启保留。Source enabled 只表示允许轮询，不证明 source healthy、事件到达或 agent 已醒来。
 
 Source control MCP 只接受 source id、非敏感身份确认、checkpoint revision 与 rebind reason，不接受任何 provider URL 或 credential。Opaque cursor 也不会经 status/verify 暴露给 agent。
 
@@ -157,7 +166,7 @@ POST /v1/sources/:source_id/disable
 
 1. 在隔离环境对真实 connector 做 manifest、auth、read-side-effect 与 cursor conformance。
 2. 由 owner 明确选择 `from-now` 或受控 backfill；`from-now` 用显式 bootstrap 写入空 checkpoint，不手改 SQLite。
-3. 用隔离 DB 先验证 bootstrap + `source-once`，确认旧通知不生成 event、event 不含正文/secret 且 resource 可回读；不要先指向 production DB。Production bootstrap 时 source 配置必须保持 `enabled=false`，完成后再受控启用，避免 poll 与空 checkpoint 竞争。
+3. 用隔离 DB 先验证 bootstrap + `source-once`，确认旧通知不生成 event、event 不含正文/secret 且 resource 可回读；不要先指向 production DB。Production bootstrap 前，文件初值明确 `enabled=false`，并用 live source status 确认有效状态已停用（已有持久 enable 时先走 disable API），完成后再受控启用，避免 poll 与空 checkpoint 竞争。
 4. 备份 Wake Bridge DB、release、LaunchAgent/env；安装 connector 自己的 rollback。
 5. 先启单一 source，以一条专用无敏感通知做 canary。
 6. 验收 event → claim → wake → ack/consume receipts；不自动回复、不改 provider read state。

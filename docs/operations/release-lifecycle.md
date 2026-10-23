@@ -12,14 +12,15 @@
 | OS | macOS；带 systemd user service 的 Linux |
 | CPU | macOS arm64/x64；Linux x64 已验证，Linux arm64 尚未验证 |
 | Node.js | 20 或更高 |
-| SQLite CLI | 3.33.0 或更高，必须支持 `-json` 输出与 JSON1 函数（`json_each`） |
+| SQLite CLI | 3.35.0 或更高，必须支持 `-json` 输出与 JSON1 函数（`json_each`） |
 | topology | 每个 Agent Space 一个本地 instance / SQLite DB |
 | schema | current 8；显式升级支持 6、7 → 8 |
-| host integration | out-of-process Host Adapter Contract v1；不内置具体 agent 产品支持 |
+| host integration | out-of-process Host Adapter Contract v1；捆绑实验性 Claude CLI online adapter，不代表通用产品支持 |
 
 自 `0.9.0-preview.9` 起，npm manifest 允许 macOS 与 Linux，并按平台生成 LaunchAgent 或 systemd user unit。Linux 实机证据来自
 Ubuntu 22.04 LTS x64 / systemd 249 的连续两轮 reboot canary；Ubuntu 24.04 x64 当前只有 CI 证据。
-SQLite 是外部 runtime prerequisite，不由 npm 安装；3.33.0 是 CLI 加入 JSON output mode 的版本。JSON1 自 3.38.0 起默认内置，
+SQLite 是外部 runtime prerequisite，不由 npm 安装；现有 endpoint renewal 与 dead-letter retry 使用的
+[`RETURNING` 语法要求 3.35.0+](https://www.sqlite.org/lang_returning.html)。只有 JSON output 支持还不够。JSON1 自 3.38.0 起默认内置，
 更早的版本需在编译时启用。macOS 自带版本与 CI 使用的 Ubuntu 24.04 均满足；其他环境以 `release-preflight` 的 `json_functions` 为准。
 
 Linux 的安装、linger、journal 与回滚步骤见 [Linux VPS runbook](linux-vps.md)。Wake Bridge、
@@ -31,7 +32,7 @@ Source Connector、Host Adapter 与 agent runtime 必须同机；跨机器 Remot
 
 ```bash
 npm pack --json
-npm install --global ./wake-bridge-0.9.0-preview.17.tgz
+npm install --global ./wake-bridge-0.9.0-preview.18.tgz
 wakebridge release-preflight
 ```
 
@@ -49,8 +50,8 @@ GitHub-hosted runner 上重新执行 typecheck、全量测试与 `npm pack`，�
 把同一个 tarball 发布到 `latest`，随后创建带 tarball 和 SHA-256 清单的 GitHub pre-release。
 
 ```bash
-git tag v0.9.0-preview.17
-git push origin v0.9.0-preview.17
+git tag v0.9.0-preview.18
+git push origin v0.9.0-preview.18
 ```
 
 打 tag 之前，先把仍写着上一个版本号的“当前版本”标注一并更新（README、quickstart、protocol、architecture、public SDK、
@@ -90,8 +91,12 @@ wakebridge service install \
   --port 4311
 ```
 
-返回值包含精确 `plist_path`、`load_command` 和 `unload_command`。plist 只保存 Node、已安装 CLI、config path、loopback
-host/port 与日志位置，不复制 owner token。核对后执行返回的 `launchctl bootstrap ...`，再检查：
+返回值包含精确 `plist_path`、`load_command` 和 `unload_command`。plist 只保存 Node、已安装 CLI、配置文件路径、loopback
+host/port 与日志位置，不复制 owner token。可选 `--host-adapters`、`--connectors`、`--source-credentials` 会将绝对路径传给 daemon；
+`--environment-file` 由 Node 在启动时读取，适合放置 host/source 所需环境变量，内容不会复制进 plist，也不会作为 shell 脚本执行。
+环境文件与 source credential 文件须为 group/other 不可读的普通文件。macOS 使用环境文件需 Node.js 20.6.0+，
+格式参见 [Node 的 env-file 说明](https://nodejs.org/download/release/latest-v20.x/docs/api/cli.html#--env-fileconfig)。
+修改环境文件后需重启服务才生效；已经存在的进程环境变量优先。核对后执行返回的 `launchctl bootstrap ...`，再检查：
 
 同机多个 Agent Space 必须为每个 instance 选择不同 loopback port；profile 不会猜测或自动抢占已有端口。
 
@@ -183,8 +188,9 @@ npm uninstall --global wake-bridge
 
 ## Artifact 内容
 
-tarball 包含运行 CLI 所需的 compiled `dist/src`、event/policy schema、LICENSE、README，以及当前 install/policy/source/SDK/operator/local-host runbook。
-tests、具体产品 Host Adapter 实验实现与文档、历史私有运行环境 artifacts、私有现场记录、源码和开发依赖不进入发布包。`exports` 只公开 root contract aggregation、
+tarball 包含运行 CLI 所需的 compiled `dist/src`、event/policy schema、LICENSE、README，以及当前 install/policy/source/SDK/operator/local-host runbook，
+也包含 reference host adapter 和实验性 Claude CLI adapter 的运行文件、示例及文档（`wakebridge-claude`）。
+tests、历史私有运行环境 artifacts、私有现场记录、Core TypeScript 源码和开发依赖不进入发布包。`exports` 只公开 root contract aggregation、
 `event`、`source`、`transport`、Group Chat reference source 与 schemas；Core/DB/daemon/operator/local-HTTP modules 只供 package 自己的 CLI 使用。
 边界和仓库外 fixture 见 [public SDK](public-sdk.md)；运行态与 dead-letter recovery 见
 [operator control](operator-control.md)。

@@ -104,6 +104,7 @@ describe("published tarball", () => {
         "docs/releases/0.9.0-preview.15.md",
         "docs/releases/0.9.0-preview.16.md",
         "docs/releases/0.9.0-preview.17.md",
+        "docs/releases/0.9.0-preview.18.md",
         "host-adapters/claude-cli/src/cli.mjs",
         "host-adapters/claude-cli/src/launcher.mjs",
         "host-adapters/claude-cli/src/channel.mjs",

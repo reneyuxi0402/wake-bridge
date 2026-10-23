@@ -22,7 +22,8 @@ import { RELEASE_VERSION } from "./version.js";
 
 export { RELEASE_VERSION } from "./version.js";
 export const MINIMUM_NODE_MAJOR = 20;
-export const MINIMUM_SQLITE_VERSION = "3.33.0";
+// Endpoint renewal and dead-letter retry already use UPDATE ... RETURNING.
+export const MINIMUM_SQLITE_VERSION = "3.35.0";
 export const SUPPORTED_PLATFORMS = ["darwin", "linux"] as const;
 export const SUPPORTED_ARCHITECTURES = ["arm64", "x64"] as const;
 
@@ -400,12 +401,11 @@ function systemdArgument(value: string): string {
 }
 
 function systemdDirectivePath(value: string): string {
-  return [...Buffer.from(value, "utf8")].map((byte) => {
-    const character = String.fromCharCode(byte);
-    if (/[A-Za-z0-9/._:@+-]/u.test(character)) return character;
-    if (character === "%") return "%%";
-    return `\\x${byte.toString(16).padStart(2, "0")}`;
-  }).join("");
+  if (/[\r\n]|[ \t\v\f]$/u.test(value)) {
+    throw new Error("systemd environment file path cannot contain CR/LF or end in ASCII whitespace; choose a different path");
+  }
+  // EnvironmentFile does not unquote/C-unescape; its runtime glob must name one literal file.
+  return value.replaceAll(/[\\*?[\]]/gu, (character) => `\\${character}`).replaceAll("%", "%%");
 }
 
 function serviceFilePath(value: string | undefined, label: string, requirePrivate = false): string | null {
@@ -423,6 +423,10 @@ export function installMacLaunchAgent(options: {
   config_path: string;
   launch_agents_directory?: string;
   logs_directory?: string;
+  environment_file?: string;
+  host_adapters_path?: string;
+  source_connectors_path?: string;
+  source_credentials_path?: string;
   cli_path?: string;
   port?: number;
 }, runtime: ReleaseRuntime = {}): { installed: true; profile: "launch_agent"; label: string; plist_path: string; load_command: string; unload_command: string } {
@@ -441,6 +445,19 @@ export function installMacLaunchAgent(options: {
   const plistPath = join(launchAgents, `${label}.plist`);
   if (existsSync(plistPath)) throw new Error(`LaunchAgent already exists: ${plistPath}`);
   const cliPath = realpathSync(resolve(options.cli_path ?? process.argv[1]));
+  const environmentFile = serviceFilePath(options.environment_file, "LaunchAgent environment file", true);
+  const hostAdaptersPath = serviceFilePath(options.host_adapters_path, "Host Adapter manifest");
+  const sourceConnectorsPath = serviceFilePath(options.source_connectors_path, "Source Connector manifest");
+  const sourceCredentialsPath = serviceFilePath(options.source_credentials_path, "source credential file", true);
+  if (environmentFile && !versionAtLeast(process.versions.node, "20.6.0")) {
+    throw new Error("LaunchAgent --environment-file requires Node.js 20.6.0 or newer");
+  }
+  const programArguments = [process.execPath];
+  if (environmentFile) programArguments.push(`--env-file=${environmentFile}`);
+  programArguments.push(cliPath, "daemon", "--config", configPath, "--host", "127.0.0.1", "--port", String(port));
+  if (hostAdaptersPath) programArguments.push("--host-adapters", hostAdaptersPath);
+  if (sourceConnectorsPath) programArguments.push("--connectors", sourceConnectorsPath);
+  if (sourceCredentialsPath) programArguments.push("--source-credentials", sourceCredentialsPath);
   const contents = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -448,12 +465,7 @@ export function installMacLaunchAgent(options: {
   <key>Label</key><string>${xml(label)}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${xml(process.execPath)}</string>
-    <string>${xml(cliPath)}</string>
-    <string>daemon</string>
-    <string>--config</string><string>${xml(configPath)}</string>
-    <string>--host</string><string>127.0.0.1</string>
-    <string>--port</string><string>${port}</string>
+${programArguments.map((argument) => `    <string>${xml(argument)}</string>`).join("\n")}
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -471,7 +483,7 @@ export function installMacLaunchAgent(options: {
     profile: "launch_agent",
     label,
     plist_path: plistPath,
-    load_command: `launchctl bootstrap ${domain} ${plistPath}`,
+    load_command: `launchctl bootstrap ${domain} '${plistPath.replaceAll("'", "'\\''")}'`,
     unload_command: `launchctl bootout ${domain}/${label}`,
   };
 }

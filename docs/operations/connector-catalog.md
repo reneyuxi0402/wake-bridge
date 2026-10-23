@@ -19,6 +19,9 @@ wakebridge connector-catalog
 
 Catalog 的 `availability` 描述发行物能力；某个已配置 source 的 `disabled | enabled | needs_attention` 是运行状态，
 两者不可混用。`available` 也不等于已经登录、已启用或生产 SLA。
+Catalog 的默认 disabled 指发行物和示例槽位，不会覆盖已有实例的运行控制。手写 `sources.json` 时必须显式填
+`"enabled": false` 才能保证首次不轮询；为兼容已有配置，省略此字段仍按 enabled 处理。已有持久 enable/disable 优先，
+详见 [source 配置与控制](source-connectors.md)。未 bootstrap 的来源能否从空 cursor 读取由 adapter 决定，Core 不自动补做 from-now。
 
 ## 小机知道：首次启用
 

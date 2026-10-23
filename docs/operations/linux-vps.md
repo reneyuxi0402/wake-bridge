@@ -1,6 +1,6 @@
 # Linux VPS deployment
 
-状态：适用于 `wake-bridge@0.9.0-preview.17`；service 与 release lifecycle 自 `0.9.0-preview.9` 起未变。Ubuntu 22.04 LTS x64 /
+状态：适用于 `wake-bridge@0.9.0-preview.18`；service 与 release lifecycle 支持自 `0.9.0-preview.9` 起提供，本版修复路径处理与配置传递。Ubuntu 22.04 LTS x64 /
 systemd 249 在 `0.9.0-preview.9` 上完成了真实 VPS 连续两轮 reboot canary；Ubuntu 24.04 x64 已在 CI 验证，但尚无独立真实 VPS 证据。Linux arm64、容器、WSL、NAS 与无 systemd 环境不在
 已验证矩阵。
 
@@ -28,7 +28,7 @@ sudo useradd --create-home --shell /bin/bash wakebridge
 sudo loginctl enable-linger wakebridge
 ```
 
-Ubuntu 需要 Node.js 20+ 与支持 JSON output 和 JSON1 函数的 SQLite CLI 3.33+（Ubuntu 24.04 系统仓库版本已由 CI 验证；其他版本以 `wakebridge release-preflight` 的 `json_functions` 为准）。Node 安装方式由 operator 选择；SQLite 可来自系统仓库：
+Ubuntu 需要 Node.js 20+ 与支持 JSON output、JSON1 函数和 `RETURNING` 的 SQLite CLI 3.35+（Ubuntu 24.04 系统仓库版本已由 CI 验证；其他版本以 `wakebridge release-preflight` 的 `json_functions` 为准）。Node 安装方式由 operator 选择；SQLite 可来自系统仓库：
 
 ```sh
 sudo apt-get update
@@ -78,6 +78,9 @@ chmod 600 "$WAKEBRIDGE_STATE_DIR/source-credentials.json"
 ```
 
 `daemon.env` 使用 systemd `EnvironmentFile=` 接受的 `NAME=value` 格式。它不能包含 shell 命令，也不要在验收输出中打印内容。
+
+安装器将 environment file 写成单一字面路径，支持空格、中文、引号、`$`、`%` 和 glob 字符；不支持包含 CR/LF 或以 ASCII 空白结尾的路径，遇到时请换路径。
+`systemd-analyze verify` 只做静态检查，不能代替真实 `start` 和环境值验证；验证时不要输出 secret。
 
 ## 5. 安装并启动 systemd user service
 

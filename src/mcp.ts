@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 import { BridgeError, WakeBridge } from "./core.js";
+import { sqlValue } from "./db.js";
 import type {
   AttentionClaim,
   BatchState,
@@ -9,7 +10,7 @@ import type {
   WakeEvent,
   WakeBatch,
 } from "./types.js";
-import { BATCH_STATES, CLAIM_STATES } from "./types.js";
+import { BATCH_STATES, CLAIM_STATES, FINALIZED_CLAIM_STATES, OPEN_BATCH_STATES } from "./types.js";
 import type { AgentSourceControl } from "./source-control-client.js";
 import { RELEASE_VERSION } from "./version.js";
 import { ABSOLUTE_RFC3339 } from "./validation.js";
@@ -103,6 +104,38 @@ function compactEvent(event: WakeEvent): JsonObject {
     matched_policy_id: event.matched_policy_id ?? null,
     matched_policy_version: event.matched_policy_version ?? null,
   };
+}
+
+function deliveryNextStep(batch: WakeBatch, agentSeen: boolean, hostAttested: boolean, ackOverdue: boolean): string {
+  if (ackOverdue) return "Agent acknowledgement is overdue. Verify actual host injection and whether the agent read the wake; host injection is not agent acknowledgement. After reading, the agent should call attention_ack with wake_batch_id; a genuine late attention_ack may still succeed. Core does not automatically resend this batch; the adapter must not acknowledge for the agent.";
+  switch (batch.state) {
+    case "pending":
+      return "Wait for the dispatch time and a live binding on this channel; inspect the daemon if overdue.";
+    case "waiting_for_endpoint":
+      return "Register or renew the exact host session on this channel and check its compatible route. Core can dispatch when a live binding is available.";
+    case "waiting_for_waiter":
+      return "Inspect the instance version and host route; this legacy state is not selected by the current automatic dispatcher.";
+    case "dispatching":
+      return "The current dispatch attempt has not settled. Let it settle and inspect again; if the worker stopped, check daemon recovery. An early attention_ack can return batch_not_dispatched before acceptance is recorded. Do not substitute consume for acknowledgement.";
+    case "retry_wait":
+      return batch.last_error === "host_timeout" || batch.last_error === "transport_timeout"
+        ? "Acceptance is unproven, but the host may already have received the wake. Inspect host injection and deduplication before further retries; never turn a timeout into a synthetic 202."
+        : "Inspect the latest failed attempt and adapter health; Core can retry after not_before. A failed response does not by itself prove the host received nothing.";
+    case "dispatched":
+      return "Transport accepted; verify actual session injection. After reading the wake, the agent should call attention_ack with wake_batch_id. Missing acknowledgement alone does not cause an automatic resend.";
+    case "seen":
+      if (agentSeen) return "The agent acknowledged this batch. Consume remaining claims only after their work is handled; no automatic resend is scheduled.";
+      if (hostAttested) return "The host proved session injection, not that the agent read it. After reading, the agent should call attention_ack with wake_batch_id; the adapter must not acknowledge for it.";
+      return "Inspect receipts: the batch state alone does not establish agent_seen. No automatic resend is scheduled.";
+    case "cancelled":
+      return "This batch will not be dispatched again. Cancellation does not recall a message already accepted by the host.";
+    case "needs_attention":
+      if (batch.last_error === "ack_timeout") return "No timely agent acknowledgement was recorded. Inspect receipts and real session delivery; a genuine late attention_ack may still succeed. Core does not automatically resend this batch.";
+      if (batch.last_error === "empty_batch") return "Inspect claim states, missing_claim_ids and the running daemon version. No deliverable claims were found, and needs_attention does not automatically retry. Do not acknowledge a never-accepted batch or edit the database to hide it.";
+      return "Inspect attempts, receipts and claim states to resolve this issue. needs_attention does not automatically retry.";
+    case "dead_letter":
+      return "Correct the rejection before considering operator batch-retry with the inspected expected-attempt and a reason; only batches with retryable claims can reopen.";
+  }
 }
 
 function asString(args: JsonObject, key: string, required = true, max = 4096): string | undefined {
@@ -335,7 +368,7 @@ function toolDefinitions(): JsonObject[] {
     },
     {
       name: "attention_wake_health",
-      description: "Inspect delivery health. Pass batch_id to drill into its claims, events, attempts, and receipts; omit it for compact actionable delivery issues.",
+      description: "Inspect delivery evidence, automatic dispatch eligibility and next steps without changing state. Pass batch_id for claims, events, attempts, receipts and recent transitions; omit it for compact actionable issues.",
       inputSchema: {
         type: "object",
         properties: {
@@ -348,7 +381,7 @@ function toolDefinitions(): JsonObject[] {
     },
     {
       name: "attention_watch_status",
-      description: "Inspect persistent inactivity watches, current binding generation, epoch, sequence, activity baseline, and next due time. Omit attention_channel to list all watches.",
+      description: "Inspect persistent inactivity watches, current binding generation, epoch, sequence, activity baseline, and next due time. Omit attention_channel to list all watches. enabled does not mean armed: waiting_for_activity requires trusted independent activity from the current binding generation; binding alone is not a baseline, and Wake activity cannot arm the watch. This is not startup-liveness or endpoint-disconnection monitoring.",
       inputSchema: {
         type: "object",
         properties: { attention_channel: { type: "string", minLength: 1, maxLength: 200 } },
@@ -357,7 +390,7 @@ function toolDefinitions(): JsonObject[] {
     },
     {
       name: "attention_watch_configure",
-      description: "Enable, update, or disable a persistent inactivity watch for one attention channel. mode=once triggers once per inactive epoch; mode=repeat continues at repeat_after_seconds while the inactivity condition remains true. Repeating the same configuration is idempotent. The bound host supplies activity evidence.",
+      description: "Enable, update, or disable a persistent inactivity watch for one attention channel. mode=once triggers once per inactive epoch; mode=repeat continues at repeat_after_seconds while the inactivity condition remains true. Repeating the same configuration is idempotent. enabled does not mean armed: waiting_for_activity requires trusted independent activity from the current binding generation, supplied by the bound host; binding alone is not a baseline, and Wake activity cannot arm the watch. This is not startup-liveness or endpoint-disconnection monitoring.",
       inputSchema: {
         type: "object",
         properties: {
@@ -605,16 +638,55 @@ export class WakeBridgeMcpServer {
         const channel = asOptionalString(args, "channel", 200);
         const limit = args.limit === undefined ? 50 : asInteger(args, "limit", 1, 100);
         const now = this.bridge.nowIso();
+        // Missing refs remain actionable; an empty array is not ack debt.
+        // Use the same predicate before LIMIT and for per-batch diagnostics.
+        const unfinishedClaims = `EXISTS (
+          SELECT 1 FROM json_each(b.claim_ids_json) j LEFT JOIN claims c ON c.id=j.value AND c.instance_id=b.instance_id
+          WHERE c.id IS NULL OR c.state NOT IN (${FINALIZED_CLAIM_STATES.map(sqlValue).join(",")})
+        )`;
         const deliveryState = (batch: WakeBatch): string => batch.state === "dispatched" ? "accepted_but_unseen" : batch.state;
         const deliverySummary = (batch: WakeBatch): JsonObject => {
           const receipts = this.bridge.listReceipts(batch.id);
           const accepted = receipts.filter((receipt) => receipt.stage === "transport_accepted").at(-1);
           const seen = receipts.some((receipt) => receipt.stage === "agent_seen");
+          const hostAttested = receipts.some((receipt) => receipt.stage === "host_attested");
+          const eligible = OPEN_BATCH_STATES.includes(batch.state);
+          const notBefore = batch.state !== "waiting_for_endpoint" && batch.deadline && batch.deadline > batch.not_before
+            ? batch.deadline : batch.not_before;
+          const awaitingAck = !seen && (batch.state === "dispatched" || batch.state === "seen"
+            || (batch.state === "needs_attention" && batch.last_error === "ack_timeout"));
+          // Match the current accepted attempt: either its completion/route
+          // receipt or its consumed nonce correlation proves acceptance/injection.
+          const currentAccepted = awaitingAck ? this.bridge.db.query<{ finished_at: string }>(`
+            SELECT a.finished_at FROM batches b JOIN outbox_attempts a ON a.batch_id=b.id
+            WHERE b.id=${sqlValue(batch.id)} AND b.instance_id=${sqlValue(this.bridge.config.instance_id)}
+              AND a.attempt_no=b.attempt AND a.state='accepted' AND a.binding_generation=b.binding_generation
+              AND a.finished_at IS NOT NULL AND ${unfinishedClaims}
+              AND (EXISTS (SELECT 1 FROM receipts r WHERE r.batch_id=b.id AND r.stage='transport_accepted'
+                AND r.at=a.finished_at AND r.endpoint_id=a.endpoint_id AND r.binding_generation=a.binding_generation
+                AND r.transport_kind=a.transport_kind)
+                OR EXISTS (SELECT 1 FROM delivery_correlations dc WHERE dc.attempt_id=a.id AND dc.batch_id=b.id
+                  AND dc.state='consumed' AND dc.endpoint_id=a.endpoint_id AND dc.binding_generation=a.binding_generation
+                  AND dc.transport_kind=a.transport_kind))
+            LIMIT 1;
+          `)[0] : undefined;
+          const deadlineMs = currentAccepted ? Date.parse(currentAccepted.finished_at) + this.bridge.config.ack_timeout_ms! : null;
+          const deadlineDate = deadlineMs === null ? null : new Date(deadlineMs);
+          // Valid extreme timeouts can exceed Date's representable range.
+          // Keep the pending evidence and numeric comparison, without inventing a date.
+          const deadlineAt = deadlineDate && !Number.isNaN(deadlineDate.getTime()) ? deadlineDate.toISOString() : null;
+          const overdue = deadlineMs !== null && Date.parse(now) >= deadlineMs;
           return {
             ...compactBatch(batch),
             delivery_state: seen ? "seen" : deliveryState(batch),
             unseen_since: !seen && accepted ? accepted.at : null,
             health_evaluated_at: now,
+            // Eligibility is a state snapshot, not a promise that the daemon is
+            // running or that a current endpoint/claim will pass dispatch checks.
+            core_dispatch: { eligible, in_flight: batch.state === "dispatching", not_before: eligible ? notBefore : null },
+            evidence: { transport_accepted: Boolean(accepted), host_attested: hostAttested, agent_seen: seen },
+            agent_ack: { pending: Boolean(currentAccepted), overdue, deadline_at: deadlineAt },
+            next_step: deliveryNextStep(batch, seen, hostAttested, overdue),
           };
         };
         if (batchId) {
@@ -642,10 +714,33 @@ export class WakeBridgeMcpServer {
             binding_generation: receipt.binding_generation,
             transport_kind: receipt.transport_kind,
           }));
-          return { delivery: deliverySummary(batch), claims: claims.map(compactClaim), events: events.map(compactEvent), attempts, receipts };
+          // Reasons can contain operator/provider free text. Only project the
+          // state edges and timestamps; attempts already expose error classes.
+          const recentTransitions = this.bridge.db.query<{ seq: number; from_state: string | null; to_state: string; at: string }>(
+            `SELECT seq, from_state, to_state, at FROM batch_transitions WHERE batch_id=${sqlValue(batch.id)} ORDER BY seq DESC LIMIT 101;`,
+          );
+          const presentClaims = new Set(claims.map((claim) => claim.id));
+          return {
+            delivery: deliverySummary(batch), claims: claims.map(compactClaim), events: events.map(compactEvent), attempts, receipts,
+            missing_claim_ids: batch.claim_ids.filter((claimId) => !presentClaims.has(claimId)),
+            transitions: recentTransitions.slice(0, 100).reverse(),
+            transitions_truncated: recentTransitions.length > 100,
+          };
         }
         const actionable: BatchState[] = ["waiting_for_endpoint", "waiting_for_waiter", "retry_wait", "dispatched", "needs_attention", "dead_letter"];
-        const batches = this.bridge.listBatches({ channel, states: actionable, limit: 100_000 }).slice(-limit);
+        // Select the newest actionable ids first, then hydrate only that page
+        // in the existing oldest-first response order.
+        const batchIds = this.bridge.db.query<{ id: string }>(`
+          SELECT b.id FROM batches b WHERE b.instance_id=${sqlValue(this.bridge.config.instance_id)}
+            ${channel ? `AND b.attention_channel=${sqlValue(channel)}` : ""}
+            AND (b.state IN (${actionable.map(sqlValue).join(",")}) OR (
+              b.state='seen' AND ${unfinishedClaims}
+              AND EXISTS (SELECT 1 FROM receipts r WHERE r.batch_id=b.id AND r.stage='host_attested')
+              AND NOT EXISTS (SELECT 1 FROM receipts r WHERE r.batch_id=b.id AND r.stage='agent_seen')
+            ))
+          ORDER BY b.created_at DESC LIMIT ${limit};
+        `);
+        const batches = batchIds.reverse().map((row) => this.bridge.getBatch(row.id)).filter((batch): batch is WakeBatch => Boolean(batch));
         return {
           now,
           deliveries: batches.map(deliverySummary),

@@ -1,22 +1,28 @@
 # First Wake Quickstart
 
-状态：`wake-bridge@0.9.0-preview.17` current onboarding。
+状态：`wake-bridge@0.9.0-preview.18` current onboarding。
 
-这条路径从全新安装走到第一条可审计 wake。它面向已经拥有 agent backend、runner、bridge service 或自制 frontend，并能实现精确 session 注入的用户。
+这条路径从全新安装走到第一条可审计 wake。先选择与你的宿主匹配的接入路径，再安装和验收。
+
+## 先选 Host 路径
+
+1. **显式启动的在线 Claude Code TTY session**：使用随包提供的实验性 [Claude CLI online adapter](../host-adapters/claude-cli/README.md)。已验证 Claude 2.1.270 的 TTY interactive session（直接运行或 detached tmux）；不支持普通已运行 session 的事后挂接、print mode、长驻 stdin `stream-json` 或 cold launch。安装、启动及完整验证范围见该 README。
+2. **已有自己的 backend、runner 或 frontend**：实现 [out-of-process Host Adapter](operations/out-of-process-host-adapter.md)，用宿主自己的精确 session 接收/注入 API。
+3. **只想检查协议 wiring**：运行 [Reference Host Adapter](../examples/reference-host-adapter/README.md)。默认 stdout sink 不会唤醒 agent；打印 envelope 或返回 202 不是端到端成功。
 
 ## 开始前先确认
 
 你需要两个彼此独立的接入面：
 
-1. **Host Adapter**：知道要唤醒的精确 session，并能启动、恢复或排队这个 session。Wake Bridge 不内置具体 agent 产品的唤醒方法。
+1. **Host Adapter**：知道要唤醒的精确 session，并具备如实声明的在线投递、启动、恢复或排队能力。Core 不猜测窗口；随包 Claude adapter 也只有上述在线范围。
 2. **Source Connector**：可选。它从论坛、邮件或群聊等来源读取事实；上游 credential 只由 Connector 保管。
 
-如果还没有 Host Adapter，可以先运行仓库附带的 [Reference Host Adapter](../examples/reference-host-adapter/README.md) 验证协议 wiring；其默认 stdout sink 不会真的启动 agent。
+以下通用步骤使用自制 adapter；选择 Claude 路径时，Host 配置和启动以其 README 为准，其余 Agent Space、MCP 与来源边界相同。
 
 ## 1. 安装并创建 Agent Space
 
-`0.9.0-preview.17` 支持 macOS arm64/x64，以及带 systemd user service 的 Linux x64；需要 Node.js 20+ 和带 JSON1 的 SQLite CLI
-3.33+。Linux 实机验证环境为 Ubuntu 22.04 LTS x64，Ubuntu 24.04 x64 当前只有 CI 证据；其他 Linux 环境先按
+`0.9.0-preview.18` 支持 macOS arm64/x64，以及带 systemd user service 的 Linux x64；需要 Node.js 20+ 和带 JSON1 的 SQLite CLI
+3.35+（还需支持 `RETURNING`）。Linux 实机验证环境为 Ubuntu 22.04 LTS x64，Ubuntu 24.04 x64 当前只有 CI 证据；其他 Linux 环境先按
 [Linux VPS runbook](operations/linux-vps.md) 执行 preflight 与本机 canary：
 
 ```sh
@@ -95,7 +101,11 @@ wakebridge inspect \
 - 没有 live binding 时，batch 保持 `waiting_for_endpoint`；这不是事件丢失；
 - adapter 返回 HTTP 202 后，Core 最多记录 `transport_accepted`；
 - adapter 自己必须证明 wake 已进入精确 session；
-- agent 醒来后从 envelope 的 resource 读取权威来源，并通过 Wake Bridge MCP `attention_ack` 与 `attention_consume` 等工具提供 seen/consumed 证据。
+- agent 实际读到 wake 后调用 `attention_ack({"wake_batch_id":"wb_..."})`，再用自己的授权工具从 resource 读取权威来源，实际审阅/处理对应 claim 后才调用 `attention_consume({"claim_id":"ac_..."})`。Adapter 不得自动代 ack/consume。
+
+验收至少要看到一次真实 agent ack、权威来源可回读，以及相应业务处理后的 consume。服务 `active`、live lease、stdout envelope、HTTP 202 或 host attestation 都不能代替这些证据。上述步骤是验收要求，不表示你的宿主已经通过真实 UAT。
+
+同步宿主 API 若直到整轮 agent 回答完成才返回，不能直接当作接收 API。202 应在宿主真实接收后返回，不必等工作完成，也不能在 timeout 后伪造返回；优先使用宿主已有接收/排队能力，无需为此另建耐久队列。超时后是否已注入可能未知，重试可能重复，见 [接收与重试边界](operations/out-of-process-host-adapter.md#3-delivery-endpoint)。
 
 如果 batch 一直等待，先检查事件、Host Adapter manifest 与 session registration 的 `attention_channel` 是否一致；Wake Bridge 不会猜测或跨 channel 错投。
 
@@ -123,21 +133,21 @@ agent 可以用 `attention_schedule` 为未来的自己建立 durable self-commi
 wakebridge connector-catalog
 ```
 
-所有 Connector 默认 `disabled`。以小机知道为例，完整顺序固定为：
+新配置应显式写 `"enabled": false`；loader 在字段省略时默认启用，并非所有 Connector 默认 disabled。已有实例的持久 enable/disable 控制优先于文件初值，先用 `attention_source_status` 查看当前 daemon 的有效状态，再按需 disable/enable，见 [Source 配置](operations/source-connectors.md#wake-bridge-配置)。以小机知道为例，完整顺序固定为：
 
 ```text
-configure → verify identity → bootstrap from-now → real UAT → enable
+configure (disabled) → verify identity → bootstrap from-now → controlled enable + real UAT
 ```
 
 由 operator 启动独立 Connector，并让 daemon 使用 `--connectors /absolute/path/sources.json`。随后 owning agent 依次调用：
 
-1. `attention_source_status`
-2. `attention_source_verify("botlingknows")`
-3. `attention_source_bootstrap(...exact verified subject/binding...)`
-4. 用一条无敏感通知完成真实 wake UAT
-5. `attention_source_enable("botlingknows")`
+1. `attention_source_status`，确认目标 source 已停用；必要时先 `attention_source_disable({"source":"botlingknows"})`
+2. `attention_source_verify({"source":"botlingknows"})`
+3. `attention_source_bootstrap`，传入 `source`，将 verify 的准确 `subject_ref` 与 `binding_fingerprint` 分别填入 `expected_subject_ref` 与 `expected_binding_fingerprint`
+4. 在隔离实例受控启用单一 source，用一条无敏感通知完成真实 wake UAT
+5. 生产接入准备完成后 `attention_source_enable({"source":"botlingknows"})`
 
-不要跳过 from-now bootstrap，不要手改 SQLite，也不要把上游 MCP URL 或 credential 传给 Wake Bridge 工具。详见 [Connector catalog](operations/connector-catalog.md)、[Source Connector contract](operations/source-connectors.md)、[小机知道 Connector](adapters/botlingknows.md) 与 [Gmail Connector](adapters/gmail.md)。
+不要跳过 from-now bootstrap，不要手改 SQLite，也不要把上游 MCP URL 或 credential 传给 Wake Bridge 工具。真实来源 UAT 应受控启用单一 source、产生一条专用通知并核对完整 receipts；完成后再决定是否保持启用。详见 [Connector catalog](operations/connector-catalog.md)、[Source Connector contract](operations/source-connectors.md)、[小机知道 Connector](adapters/botlingknows.md) 与 [Gmail Connector](adapters/gmail.md)。
 
 ## 6. 停止与保留数据
 

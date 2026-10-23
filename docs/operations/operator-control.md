@@ -1,6 +1,6 @@
 # Operator status and dead-letter recovery
 
-状态：introduced in `wake-bridge@0.9.0-preview.3`; current in `0.9.0-preview.17`。
+状态：introduced in `wake-bridge@0.9.0-preview.3`; current in `0.9.0-preview.18`。
 
 这组命令面向单 Agent Space 的 operator，不属于第三方 SDK，也不进入 agent MCP。它只补运行态定位与永久投递失败的受控
 恢复，不替 agent 判断来源工作是否仍需处理。
@@ -49,6 +49,64 @@ address、lease token、session ref、provider error message、source credential
 HTTP 可用 `?limit=` 指定 1–100000；events 默认 100，其余默认 1000。带 `after` 的 `attention_event_list` 从该时间向后翻页。
 需要完整数量时用 `attention_status` 或 `wakebridge status`，它们直接在 SQL 中计数，不受列表上限影响。
 
+## 一条 wake 卡住时的本地只读排查
+
+先确认正在查看同一个 Agent Space 的 config/daemon，不要启动第二个 canonical daemon，也不要通过手改 SQLite、自动 ack/consume 或批量 retry 清空红色状态。
+`wakebridge status --config /absolute/path/wakebridge.config.json` 可读 durable 状态；live source 状态按上面的 authenticated `/v1/status`，
+或由 owning agent 使用 `attention_source_status` 查看。Service `active` 仅证明进程状态，不证明 source 已启用、host 已接收或 agent 已处理。
+
+Agent 可通过已配置的本地 Wake Bridge MCP 依次调用这些只读工具（下列是工具名与 JSON 参数，不是 shell command）：
+
+```text
+attention_binding_status {"channel":"life"}
+attention_wake_health {"channel":"life","limit":10}
+attention_wake_health {"batch_id":"wb_..."}
+```
+
+先检查 channel 与 live binding，再从 issues 选出准确 batch drill-down。`attempt` 是累计尝试数，不表示当前仍会自动重投。
+`core_dispatch.eligible` 仅说明当前 state 属于 Core 自动派发候选，不保证下一轮一定投递；还要核对 `in_flight`、`not_before`、
+binding/lease 和 claims。`needs_attention` 不在自动派发候选中，不能仅凭旧 attempt 增长记录认定它仍在重试。
+
+读证据时分别看 `evidence.transport_accepted`、`evidence.host_attested`、`evidence.agent_seen`，并核对已有 attempts/receipts：
+旧 `delivery_state` 或 batch state 的 `seen` 可能来自 host attestation，不自动意味着 `agent_seen`。单 batch 的 `transitions` 提供最近最多
+100 条 seq/from_state/to_state/at，`transitions_truncated` 提示历史是否截断；它保留时间线但不暴露任意 reason 正文。
+`missing_claim_ids` 是缺失引用，不能当作工作已完成。`next_step` 给出固定操作提示，仍须按真实宿主结果决定操作。
+
+`delivery.agent_ack` 是读取时计算的只读诊断，不改变旧 state：`pending` 要求当前 accepted attempt 有匹配的真实接受/注入证据，
+即 `transport_accepted` receipt，或同 attempt、batch、endpoint/generation/transport 的 consumed nonce correlation。
+后者覆盖 HTTP 回程丢失但宿主已证明注入的情况，不会补造 `transport_accepted` receipt。
+还须尚无 `agent_seen`，且 batch 处于 `dispatched`、`seen` 或 `needs_attention / ack_timeout`，
+并仍引用未完成或缺失的 Claim。空引用、全部 Claim 已 consumed/dismissed/expired 均不算 pending。
+`deadline_at` 从该 attempt 的接受完成时间加 `ack_timeout_ms` 推算，`now >= deadline` 时 `overdue=true`；
+无待确认项时为 null，合法极值 timeout 超出 JavaScript Date 可表示范围时也为 null，但保留 pending 和数值超时判断。
+默认列表除原 actionable states 外，也会列出有 `host_attested`、无 `agent_seen` 且仍有未完成或缺失 Claim 的 `seen` 批次。
+该筛选在最近 `limit` 条之前完成，结果仍按时间先后返回。
+
+- `waiting_for_endpoint`：检查精确 session 是否在线、channel 是否匹配、lease/generation 是否当前；不要反复 emit 新事件替代修复绑定。
+- timeout / retry wait：核对 HTTP 尝试与真实 host 接收记录。Timeout 不证明未注入；有重复风险，不要伪造 202 或盲目手工补投。
+- transport accepted、无 agent ack：核对宿主是否确实注入、是否因 busy/权限等待，以及 agent 是否读到 envelope；不能由 adapter 代 ack。
+- 全部 claims finalized / empty：Core 在恢复/派发扫描时，会将原 claim 引用非空、每条均存在且已 consumed/dismissed/expired、仍处于派发等待状态的批次收尾为 `cancelled`，历史 `needs_attention / empty_batch` 也适用。Attempts、receipts 和原引用保留；空引用、missing claim 或尚未完成的 claim 不会被当作完成证据。仍有异常时保留证据排查，不删库修复。
+- `dead_letter`：先修复实际拒绝原因，符合下一节 CAS/claim 条件后才能显式 retry；不要把 `needs_attention` 当 dead letter。
+
+确认 agent 真正读到 wake 后，用 `attention_ack({"wake_batch_id":"wb_..."})` 记录 agent seen。若抢在接受落地前得到
+`409 batch_not_dispatched`，确认同 batch 当前 accepted attempt 后可重试同一 ack；不要吞掉错误或对 stale generation 等所有 409 无限重试。
+回读权威来源并审阅/处理对应 claim 后才 consume。最终验收是一次真实 agent ack 加实际来源处理，不是 daemon active、打印 envelope 或 transport 202。
+
+## Retryable transport failure
+
+自 `0.9.0-preview.18` 起，对未被接受、可重试且未提供有效 `retry_after_ms` 的 transport 结果使用有上限的指数退避：默认等待
+5、10、20、40、80、160、300 秒，此后每次 300 秒。从每次尝试完成时起算，准确的下一次时间以 batch 的
+`not_before` 为准。升级不重写已保存的等待时间，后续失败才按新规则计算。
+
+退避复用持久化的累计 `attempt`，重启或换 binding generation 不将计数归零；它不是“连续网络失败次数”。直接嵌入
+Core 时，既有 `retry_delay_ms` 作为基数：0 保留立即重试，基数超过 300 秒时不被缩短。有效的 transport
+`retry_after_ms` 仍优先（包括 0），沿用最高 24 小时限制。本次不增加实例文件或 CLI 配置项。
+
+这是降低重复请求频率，不是次数上限、自动告警或 exactly-once 保证；工作不会因为尝试多次而被静默丢弃。
+HTTP timeout 仍表示接受结果未证实，宿主可能已经收到，必须使用稳定业务标识去重或核对真实注入证据。
+有真实接受/host attestation 的 batch 不因缺 agent ack 而重新进入这个重试路径。派发前 generation fencing 失败
+沿用原恢复间隔，不被包装成网络投递失败。
+
 ## Accepted but unacknowledged delivery
 
 自 preview.10 起提供；preview.8 / preview.9 没有此确认超时处理。
@@ -77,6 +135,9 @@ needs-attention 摘要；agent 可用 `attention_wake_health` 查看 accepted �
 
 支持 session activity 的 Host Adapter 可用当前 generation 的一次性 delivery nonce 回报 `host_attested`。这会将 batch 收尾为
 `seen` 并解除 `ack_timeout`，但不会生成 `agent_seen`、`agent_consumed` 或 `agent_acted`。
+因此，host-attested `seen` 的旧 `ack_timeout` 虽已解除，读取时仍可能显示 `agent_ack.pending / overdue`；这只表示缺少真实 agent 确认。
+Core 的确认超时扫描仍只将 `dispatched` 转成 `needs_attention`，不会为这类 `seen` 诊断生成新的 core incident 或主动提醒，
+也不会自动重投或让 adapter 代 ack。仍须核对实际注入与 agent 是否读到，再由 agent 自己确认。
 
 ## Dead-letter retry
 
