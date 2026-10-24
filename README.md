@@ -23,7 +23,7 @@ Wake Bridge 是一个 local-first 的 **agent attention scheduler and delivery c
 
 ## 开始使用
 
-从 [First Wake Quickstart](docs/quickstart.md) 开始。它覆盖 clean install、Agent Space 初始化、仓库外 Host Adapter、第一条受控 wake、MCP、presence、self-commitment 与可选 Source Connector。完整公共文档见 [文档导航](docs/README.md)。
+从 [First Wake Quickstart](docs/quickstart.md) 开始。它覆盖 clean install、Agent Space 初始化、仓库外 Host Adapter、第一条受控 wake、MCP、presence、self-commitment 与可选 Source Connector。完整公共文档见 [在线文档导航](https://github.com/reneyuxi0402/wake-bridge/blob/main/docs/README.md)（npm 包只附带运行所需文档）。
 
 当前源码为 `0.9.0-preview.19` 发布候选，见 [release notes](docs/releases/0.9.0-preview.19.md)；须通过同一 tag commit 的四组 CI 后才发布到 npm `latest`。
 已发布的 `0.9.0-preview.18` 不改写。包内置可选的 Claude CLI 在线会话 Host Adapter

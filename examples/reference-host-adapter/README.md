@@ -26,7 +26,12 @@ Timeout/响应丢失可能发生在真实接受之后；Core retry 会生成新 
 `tested_host_versions` 和 capability 声明，并让 daemon 使用 `--host-adapters` 加载它。Host bootstrap token 与 delivery
 route token 必须是两个不同的、至少 32 字符的随机值；不要写进 JSON、shell history 或仓库。
 
-构建 package 后启动示例：
+从源码 checkout 运行时，先构建 package，并在仓库根目录执行下面的命令。已安装 npm package 无需再构建，但必须先进入安装后的
+`wake-bridge` package 目录（本地安装例如 `/absolute/path/to/node_modules/wake-bridge`；全局安装可用
+`cd "$(npm root --global)/wake-bridge"`），不能直接在任意项目目录运行这个相对路径。
+
+Reference adapter 默认监听 `127.0.0.1:4393`；该端口已占用时会报 `EADDRINUSE`。下面显式使用
+`WAKEBRIDGE_REFERENCE_HOST_PORT=0`，让 OS 选择空闲 loopback 端口，adapter 会自动登记实际 `route_origin`。
 
 ```sh
 export WAKEBRIDGE_DAEMON_ORIGIN=http://127.0.0.1:4311
@@ -34,8 +39,30 @@ export WAKEBRIDGE_HOST_TOKEN='<host bootstrap token>'
 export WAKEBRIDGE_ROUTE_TOKEN='<different route token>'
 export WAKEBRIDGE_SESSION_REF='<exact host session id>'
 export WAKEBRIDGE_ATTENTION_CHANNEL=default
+export WAKEBRIDGE_REFERENCE_HOST_PORT=0
 node examples/reference-host-adapter/adapter.mjs
 ```
+
+保持 daemon 与 adapter 运行，在另一个终端发送第一条协议测试事件：
+
+```sh
+wakebridge emit \
+  --config /absolute/path/wakebridge.config.json \
+  --source manual --type reference.test \
+  --dedupe-key reference-first-wake-1 \
+  --attention-channel-hint default \
+  --resource quickstart://reference-first-wake
+```
+
+等待 daemon 下一轮调度、adapter 的 stdout 打印 envelope 后，再检查 receipt：
+
+```sh
+wakebridge receipts --config /absolute/path/wakebridge.config.json
+```
+
+本例 manifest 与 session 使用 `default` channel，测试事件也必须一致。Quickstart 通用示例使用 `life`；若直接沿用它，
+应把事件改为 `default`，或把 manifest、session 和事件三处都改为 `life`，否则 batch 会保持 `waiting_for_endpoint`。
+stdout envelope 与 `transport_accepted` 只表示协议投递通过；本例没有真实 agent，因此预期没有 `agent_seen` 或 `agent_consumed`。
 
 仓库自带的 `acceptWake` 只把 envelope 写到 stdout，因此只证明协议 wiring，不会启动 agent。接入真实宿主时：
 
