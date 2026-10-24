@@ -1,6 +1,11 @@
 # 公开验证口径
 
-状态：`wake-bridge@0.9.0-preview.18` release candidate；发布后由 npm `latest` 与 GitHub pre-release 提供同一 tarball。
+状态：`wake-bridge@0.9.0-preview.19` release candidate；发布后由 npm `latest` 与 GitHub pre-release 提供同一 tarball。
+
+本轮发布前本地回归共 409 项测试通过（392 项 Vitest + 17 项 Claude adapter Node 测试）。
+macOS / Ubuntu 24.04 × Node 20 / 24 四组 CI 均已有通过记录；其中 macOS Node 20 首轮停滞后取消，重跑通过，原因尚未确定。
+这些是发布前回归证据，不等于 `v0.9.0-preview.19` 的真实 tag 发布门禁已验收。发布 workflow 必须在同一 tag commit 上重新运行四组 CI，
+四组全部成功才可打包发布。本轮没有新增真实模型端到端 UAT，不扩大既有宿主或平台验证承诺。
 
 公共仓库用以下证据验证自身，不用具体宿主产品的现场结果代替通用契约：
 

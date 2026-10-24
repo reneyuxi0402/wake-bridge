@@ -32,7 +32,7 @@ Source Connector、Host Adapter 与 agent runtime 必须同机；跨机器 Remot
 
 ```bash
 npm pack --json
-npm install --global ./wake-bridge-0.9.0-preview.18.tgz
+npm install --global ./wake-bridge-0.9.0-preview.19.tgz
 wakebridge release-preflight
 ```
 
