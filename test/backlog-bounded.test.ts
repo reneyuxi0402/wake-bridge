@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WakeBridge } from "../src/core.js";
 import { sqlJson, sqlValue } from "../src/db.js";
@@ -89,10 +90,35 @@ function cacheFixturePolicyReads(bridge: WakeBridge): void {
     statement === sql ? policy as T[] : query<T>(statement));
 }
 
-afterEach(() => {
+function cacheFutureWaiterReads(bridge: WakeBridge, channel: string): () => number {
+  // Call only after transport has really moved these fixture rows into the
+  // future. They cannot change again in this test, so exact getBatch reads can
+  // reuse this real snapshot; candidate selection and live bindings stay real.
+  const query = bridge.db.query.bind(bridge.db);
+  const rows = query(`SELECT * FROM batches WHERE instance_id=${sqlValue(bridge.config.instance_id)}
+    AND attention_channel=${sqlValue(channel)} AND state='waiting_for_endpoint' AND not_before=${sqlValue(future)};`);
+  const snapshots = new Map(rows.map((row) => [
+    `SELECT * FROM batches WHERE id=${sqlValue(row.id)} AND instance_id=${sqlValue(bridge.config.instance_id)} LIMIT 1;`, [row],
+  ]));
+  let cachedReads = 0;
+  vi.spyOn(bridge.db, "query").mockImplementation(<T extends Record<string, unknown>>(sql: string): T[] => {
+    const snapshot = snapshots.get(sql);
+    if (snapshot) {
+      cachedReads += 1;
+      return snapshot as T[];
+    }
+    return query<T>(sql);
+  });
+  return () => cachedReads;
+}
+
+afterEach(async () => {
   vi.restoreAllMocks();
   for (const bridge of bridges.splice(0)) bridge.close();
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+  // SQLite subprocesses are synchronous. Give fork RPC acknowledgements an I/O
+  // turn between tests instead of starving them until the whole file finishes.
+  await setImmediate();
 });
 
 describe("bounded scheduler backlog work", () => {
@@ -195,15 +221,18 @@ describe("bounded scheduler backlog work", () => {
     const [batchId] = bridge.tick().batches_created;
     const transport = bridge.transports.get("bounded-test")!;
     const dispatch = transport.dispatch.bind(transport);
+    let cachedFutureReads = () => 0;
     vi.spyOn(transport, "dispatch").mockImplementation((context) => {
       // Once ordering is established, avoid spending this test on another 999
       // identical missing endpoints. Already selected IDs still need rechecks.
       bridge.db.exec(`UPDATE batches SET not_before=${sqlValue(future)} WHERE attention_channel='unbound';`);
+      cachedFutureReads = cacheFutureWaiterReads(bridge, "unbound");
       return dispatch(context);
     });
 
     expect(await bridge.dispatchDue()).toMatchObject([{ batch_id: batchId, status: "accepted" }]);
     expect(calls).toEqual([batchId]);
+    expect(cachedFutureReads()).toBe(999);
   });
 
   it("rotates more than 1000 no-compatible waiters so later bound work is not starved", async () => {
@@ -216,10 +245,12 @@ describe("bounded scheduler backlog work", () => {
     const query = bridge.db.query.bind(bridge.db);
     const transport = bridge.transports.get("bounded-test")!;
     const dispatch = transport.dispatch.bind(transport);
+    let cachedFutureReads = () => 0;
     vi.spyOn(transport, "dispatch").mockImplementation((context) => {
       // Fairness is established when this later batch reaches transport.
       // Let the rest of the selected identical waiters take the cheap due gate.
       bridge.db.exec(`UPDATE batches SET not_before=${sqlValue(future)} WHERE attention_channel='unsupported';`);
+      cachedFutureReads = cacheFutureWaiterReads(bridge, "unsupported");
       return dispatch(context);
     });
     advance(1);
@@ -256,6 +287,7 @@ describe("bounded scheduler backlog work", () => {
     const second = await bridge.dispatchDue();
     expect(second.length).toBeLessThanOrEqual(1000);
     expect(calls).toEqual([batchId]);
+    expect(cachedFutureReads()).toBe(998);
     expect(bridge.db.query("SELECT COUNT(*) AS count FROM receipts r WHERE r.batch_id LIKE 'wb_bulk_%';"))
       .toEqual([{ count: 0 }]);
   });
