@@ -110,7 +110,7 @@ Daemon 用 `WAKEBRIDGE_SOURCE_CONNECTORS_FILE=/absolute/path/sources.json` 读�
 
 ### 有效配置为什么与文件不同
 
-以下解释字段是 `main` 的后续维护改动，未包含在已发布 preview.19 中。行为本身不变：省略 `enabled` 仍为 true，持久控制仍优先。
+以下解释字段自 preview.20 起提供。行为本身不变：省略 `enabled` 仍为 true，持久控制仍优先。
 
 `source-validate` 只验证文件，返回的 `enabled_semantics` 明确其 `sources[].enabled` 是文件初值，不会读取或更改运行控制。
 运行中 `attention_source_status`、`GET /v1/sources` 及 live operator status 的 source 条目增加：

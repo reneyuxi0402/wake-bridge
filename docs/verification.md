@@ -2,13 +2,21 @@
 
 ## 发行基线与源码增量
 
+本版 `0.9.0-preview.20` 包含下述维护增量，见 [release notes](releases/0.9.0-preview.20.md)。
+发布准备前源码提交 `c281df19469e03b18826a9259b671e789049d7dd` 的本地完整回归为 488 项 Vitest + 17 项 Node，共 505 项；
+[同提交 CI](https://github.com/reneyuxi0402/wake-bridge/actions/runs/40284178626) 四组首轮全部通过。
+这些是源码验收，不代替 preview.20 自身 tag 的发布门禁；该 tag 的四组全部通过后，工作流才发布 npm `latest` 与 GitHub prerelease。
+发布和安装状态应以对应 tag 工作流及 npm 实际可下载产物为准，不以源码版本号或 main CI 成功推断。
+
+### preview.19 历史发行基线
+
 `wake-bridge@0.9.0-preview.19` 已发布。其 tag 提交为 `e62eaa34238445bb92f6c14805f1fd1f3631f804`，
 [发布工作流](https://github.com/reneyuxi0402/wake-bridge/actions/runs/40104086788) 在同 tag 的四组 CI 全部成功后发布；
 macOS Node 20 首轮停滞取消、第二次通过的事实保留，根因未确认。npm 与 GitHub 提供同字节 tarball，SHA-256 为
 `76ce265fb0be12e413f1747058e211ec040bcb6a5f8eaba83197613d0b64fec5`。该发行基线每组产品回归为 392 项 Vitest + 17 项 Node 测试。
 
-`main` 含发行后的文档与 CI 诊断改动，以及后续维护代码；它们不会改变已发布的 preview.19。
-新增的安全错误分类、source 有效配置解释、积压调度边界和恢复失败清理须经下一次版本发布才可从 npm 安装。
+preview.20 汇入发行后的文档与 CI 诊断改动，以及安全错误分类、source 有效配置解释、积压调度边界和恢复失败清理；
+这些不会改变已发布的 preview.19。
 当前维护回归不新增真实模型 UAT、不扩大宿主或平台支持范围；具体测试覆盖与限制见下文及相关运维页。
 
 ### 后续维护的回归边界

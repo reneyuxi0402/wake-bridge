@@ -1,6 +1,6 @@
 # 小机知道通知 Source Connector adapter
 
-状态：official optional Source Connector，默认 disabled。本文对应 wake-bridge 0.9.0-preview.19 的 adapter 0.2.0；
+状态：official optional Source Connector，示例显式 disabled。本文对应 wake-bridge 0.9.0-preview.20 的 adapter 0.2.0；
 需要小机知道新版摘要协议。包发布不代表既有安装已升级，每个 Agent Space 仍需核验与 UAT。
 
 ## 只查摘要，不提前已读

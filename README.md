@@ -25,7 +25,7 @@ Wake Bridge 是一个 local-first 的 **agent attention scheduler and delivery c
 
 从 [First Wake Quickstart](docs/quickstart.md) 开始。它覆盖 clean install、Agent Space 初始化、仓库外 Host Adapter、第一条受控 wake、MCP、presence、self-commitment 与可选 Source Connector。完整公共文档见 [在线文档导航](https://github.com/reneyuxi0402/wake-bridge/blob/main/docs/README.md)（npm 包只附带运行所需文档）。
 
-已发布基线为 `0.9.0-preview.19`，见 [release notes](docs/releases/0.9.0-preview.19.md)。`main` 的后续维护改动不自动进入 npm；
+本版为 `0.9.0-preview.20`，见 [release notes](docs/releases/0.9.0-preview.20.md)。版本须经同 tag 四组门禁后发布到 npm `latest`；
 已发布 tarball/tag 不改写，源码与发行证据的区别见 [公开验证口径](docs/verification.md)。包内置可选的 Claude CLI 在线会话 Host Adapter
 与 Gmail Source Connector；已在
 Ubuntu 22.04 LTS x64 实机完成连续两轮 reboot canary，并在 Ubuntu 24.04 x64 CI 验证。Wake Bridge 本身不内置任何具体
@@ -132,7 +132,7 @@ Source Connector 的本地协议、身份 fencing、cursor CAS 与错误处理�
 
 ## Preview 安装
 
-当前 package 名称为 `wake-bridge`，每个版本都发布到 npm 的 `latest` dist-tag。`0.9.0-preview.19` 的支持范围仍为 macOS arm64/x64，以及带 systemd
+当前 package 名称为 `wake-bridge`，每个版本都发布到 npm 的 `latest` dist-tag。`0.9.0-preview.20` 的支持范围仍为 macOS arm64/x64，以及带 systemd
 user service 的 Linux x64；需要 Node.js 20+ 与支持 JSON 输出、JSON1 和 `RETURNING` 的 SQLite CLI 3.35+。Linux 实机证据来自 Ubuntu 22.04 LTS x64，Ubuntu
 24.04 x64 当前只有 CI 证据；Linux arm64、容器、WSL、NAS 与无 systemd 环境不在已验证矩阵。部署路径见
 [Linux VPS runbook](docs/operations/linux-vps.md)。
@@ -151,7 +151,7 @@ wakebridge release-preflight
 
 ```bash
 npm pack --json
-npm install --global ./wake-bridge-0.9.0-preview.19.tgz
+npm install --global ./wake-bridge-0.9.0-preview.20.tgz
 wakebridge release-preflight
 wakebridge init \
   --data-dir /absolute/private/path \

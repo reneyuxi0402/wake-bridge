@@ -1,6 +1,6 @@
 # Operator status and dead-letter recovery
 
-状态：introduced in `wake-bridge@0.9.0-preview.3`; current in `0.9.0-preview.19`。
+状态：introduced in `wake-bridge@0.9.0-preview.3`; current in `0.9.0-preview.20`。
 
 这组命令面向单 Agent Space 的 operator，不属于第三方 SDK，也不进入 agent MCP。它只补运行态定位与永久投递失败的受控
 恢复，不替 agent 判断来源工作是否仍需处理。
@@ -42,9 +42,9 @@ credential 不能调用该 endpoint。
 address、lease token、session ref、provider error message、source credential 或 owner token。它只保留安全的 error class；详细 provider
 错误仍留在本地 DB/operator evidence 中，不进入结构化 health payload。
 
-## 安全错误诊断（main 后续维护）
+## 安全错误诊断（preview.20 起）
 
-以下新增诊断尚未包含在已发布 preview.19 中。scheduler 的本地 warning 使用固定 JSON 字段 `phase` / `error_class`，
+以下诊断自 preview.20 起提供。scheduler 的本地 warning 使用固定 JSON 字段 `phase` / `error_class`，
 不输出原始异常、SQL、SQLite stdout/stderr、cause 或请求片段：
 
 ```json

@@ -1,6 +1,6 @@
 # 架构与路由
 
-状态：`0.9.0-preview.19` current public contract。首版 deployment topology 为单 Agent Space
+状态：`0.9.0-preview.20` current public contract。首版 deployment topology 为单 Agent Space
 instance；共享 service 多 Space 已延后为 post-MVP proposal。
 
 ## 1. 系统边界
@@ -186,7 +186,7 @@ Attention Claim 表示“某个 resource 从某个时刻起值得重新获得一
 
 quiet hours 当前默认 defer。允许 bypass 必须由具体 policy 明写；release 使用精确本地分钟边界，不提供 resume spread。
 
-`main` 的后续维护（尚未包含在 preview.19）先在 SQLite 中筛选到期或过期的 Claim，每次 `tick()`
+自 preview.20 起，先在 SQLite 中筛选到期或过期的 Claim，每次 `tick()`
 至多推进 1000 条，再至多将 1000 条 eligible Claim 编批；余量留给后续轮次。查找可追加 Batch 按当前
 policy/channel/coalesce key 定位，不把全部未完成 Batch 读入进程。新事件合并仍要求来源、resource 结构与投递策略语义相同。
 
@@ -248,7 +248,7 @@ versioned WakePayload reference。具体 bridge/frontend/runner 保留在宿主�
 - warm 与 cold 不并发双投；
 - 分开记录 transport accepted、agent completed、agent seen、event consumed/acted。
 
-`main` 的后续维护中，每次 `dispatchDue()` 至多检查 1000 个到期 Batch，并在 Batch 之间检查一秒软时间预算。
+自 preview.20 起，每次 `dispatchDue()` 至多检查 1000 个到期 Batch，并在 Batch 之间检查一秒软时间预算。
 预算使用单调运行时钟，与可注入的业务时钟分开；每轮至少允许一个候选推进，预算耗尽后让出事件循环，余量留给下一轮。
 候选查询只返回 ID，优先有有效
 binding/endpoint 的 channel；暂不可投递的等待项通过既有 `updated_at` 轮转，不新增持久游标。投递前仍逐项

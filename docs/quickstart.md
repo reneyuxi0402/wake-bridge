@@ -1,6 +1,6 @@
 # First Wake Quickstart
 
-状态：以已发布 `wake-bridge@0.9.0-preview.19` 为安装基线；`main` 后续新增能力须等待下一次发布，见 [验证口径](verification.md)。
+状态：本指南对应 `wake-bridge@0.9.0-preview.20`；发行须通过同 tag 门禁，安装以 npm 可用版本为准，见 [验证口径](verification.md)。
 
 这条路径从全新安装走到第一条可审计 wake。先选择与你的宿主匹配的接入路径，再安装和验收。
 
@@ -21,7 +21,7 @@
 
 ## 1. 安装并创建 Agent Space
 
-`0.9.0-preview.19` 支持 macOS arm64/x64，以及带 systemd user service 的 Linux x64；需要 Node.js 20+ 和带 JSON1 的 SQLite CLI
+`0.9.0-preview.20` 支持 macOS arm64/x64，以及带 systemd user service 的 Linux x64；需要 Node.js 20+ 和带 JSON1 的 SQLite CLI
 3.35+（还需支持 `RETURNING`）。Linux 实机验证环境为 Ubuntu 22.04 LTS x64，Ubuntu 24.04 x64 当前只有 CI 证据；其他 Linux 环境先按
 [Linux VPS runbook](operations/linux-vps.md) 执行 preflight 与本机 canary：
 
