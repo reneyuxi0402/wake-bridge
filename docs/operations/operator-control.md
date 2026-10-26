@@ -67,6 +67,19 @@ attention_wake_health {"batch_id":"wb_..."}
 `core_dispatch.eligible` 仅说明当前 state 属于 Core 自动派发候选，不保证下一轮一定投递；还要核对 `in_flight`、`not_before`、
 binding/lease 和 claims。`needs_attention` 不在自动派发候选中，不能仅凭旧 attempt 增长记录认定它仍在重试。
 
+### 不要混用三种时间边界
+
+| 字段 / 配置 | 含义 | 不代表什么 |
+| --- | --- | --- |
+| batch `deadline` | 合批窗口结束时间；创建时为当前时间加 `batch.window_ms` | 不是 HTTP 接收响应的超时预算 |
+| Host Adapter reference `timeout_ms` | 本地 HTTP adapter 等待接收响应的预算，默认 5000ms，范围 100–30000ms | 不是等待 agent 完整处理工作的时限 |
+| `ack_timeout_ms` / `delivery.agent_ack.deadline_at` | 接受后等待 agent 确认的时限 / 对应确认截止时间 | 不是合批窗口，也不触发对已接受投递的自动重发 |
+
+batch 创建时 `not_before` 为当前时间，因此零长度合批窗口下 `not_before == deadline` 是正常读数。
+失败重试会另行推进 `not_before`；不要用 `deadline - not_before` 计算 HTTP 超时。
+应检查正在运行的 daemon 实际加载的 Host Adapter reference，而不是只看某个文件里的值或凭一次耗时反推配置。
+接收边界见 [Host Adapter protocol](out-of-process-host-adapter.md#接收不是整轮处理完成)。
+
 读证据时分别看 `evidence.transport_accepted`、`evidence.host_attested`、`evidence.agent_seen`，并核对已有 attempts/receipts：
 旧 `delivery_state` 或 batch state 的 `seen` 可能来自 host attestation，不自动意味着 `agent_seen`。单 batch 的 `transitions` 提供最近最多
 100 条 seq/from_state/to_state/at，`transitions_truncated` 提示历史是否截断；它保留时间线但不暴露任意 reason 正文。

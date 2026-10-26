@@ -140,6 +140,8 @@ Transport 使用有界 timeout、拒绝 redirects，只连接 `127.0.0.1` 或 `:
 
 每个 adapter reference 可设置 `timeout_ms`（100–30000 毫秒，默认 5000）；这是等待接受响应的预算，不是等待
 agent 完整工作的时限。可重试失败的默认节奏与 `retry_after_ms` 边界见 [operator control](operator-control.md#retryable-transport-failure)。
+batch 的 `deadline` 则是合批窗口结束时间，不是本次 HTTP 调用的截止时间；零合批窗口下它可以等于创建时的
+`not_before`。接受后的 `ack_timeout_ms` 另管 agent 确认，三者不要互相替代。见 [时间边界对照](operator-control.md#不要混用三种时间边界)。
 
 请求超时/响应丢失时，Core 没有 HTTP 接受证据，但宿主可能已经接收；不要据此断言未投递，也不要自动 ack/consume。
 Core retry 会创建新的 `attempt_id`。同 attempt 的进程内去重不足以防止跨 retry 或 adapter 重启后的重复业务投递；

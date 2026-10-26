@@ -44,4 +44,26 @@ jobs:
         run: npm run typecheck
 
       - name: Test
+        if: runner.os != 'macOS' || matrix.node != 20
         run: npm test
+
+      - name: Test with bounded stall diagnostics
+        if: runner.os == 'macOS' && matrix.node == 20
+        timeout-minutes: 15
+        run: |
+          node --test .github/scripts/ci-diagnostic-selftest.mjs
+          node .github/scripts/ci-test-diagnostic.mjs
+
+      - name: Upload bounded stall evidence
+        if: always() && runner.os == 'macOS' && matrix.node == 20
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-node20-test-diagnostic-${{ github.run_attempt }}
+          retention-days: 1
+          if-no-files-found: warn
+          path: |
+            ci-test-evidence/metadata.json
+            ci-test-evidence/diagnostic.jsonl
+            ci-test-evidence/sample-node.txt
+            ci-test-evidence/sample-sqlite3.txt
+            ci-test-evidence/result.json
