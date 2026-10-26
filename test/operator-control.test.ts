@@ -74,6 +74,9 @@ describe("operator status and dead-letter recovery", () => {
       const status = operatorStatus(fixture.bridge, { sources: [{
         source: "fixture-source",
         enabled: true,
+        loaded_config_enabled: true,
+        persisted_control_enabled: null,
+        enabled_source: "configuration",
         state: "needs_attention",
         last_started_at: "2026-08-30T00:00:00.000Z",
         last_success_at: null,

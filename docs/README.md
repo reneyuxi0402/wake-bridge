@@ -28,6 +28,9 @@
 
 ## 运维与发布
 
+- [发行基线、源码增量与验证边界](verification.md)
+- [长期维护与隔离恢复演练](operations/release-lifecycle.md#长期维护与隔离恢复演练)
+- [Source 实际启停来源](operations/source-connectors.md#有效配置为什么与文件不同)
 - [Personal policy](operations/policies.md)
 - [Operator control](operations/operator-control.md)
 - [Release lifecycle](operations/release-lifecycle.md)

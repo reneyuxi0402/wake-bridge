@@ -186,6 +186,10 @@ Attention Claim 表示“某个 resource 从某个时刻起值得重新获得一
 
 quiet hours 当前默认 defer。允许 bypass 必须由具体 policy 明写；release 使用精确本地分钟边界，不提供 resume spread。
 
+`main` 的后续维护（尚未包含在 preview.19）先在 SQLite 中筛选到期或过期的 Claim，每次 `tick()`
+至多推进 1000 条，再至多将 1000 条 eligible Claim 编批；余量留给后续轮次。查找可追加 Batch 按当前
+policy/channel/coalesce key 定位，不把全部未完成 Batch 读入进程。新事件合并仍要求来源、resource 结构与投递策略语义相同。
+
 ### Foreground Presence Lease
 
 前台在场不是钟表 quiet hours，也不等于单个 turn busy。它是一项按 `attention_channel + endpoint_id + binding_generation` 绑定的短 TTL 调度租约：
@@ -243,6 +247,12 @@ versioned WakePayload reference。具体 bridge/frontend/runner 保留在宿主�
 - 同一 batch 的重试沿用逻辑 id；
 - warm 与 cold 不并发双投；
 - 分开记录 transport accepted、agent completed、agent seen、event consumed/acted。
+
+`main` 的后续维护中，每次 `dispatchDue()` 至多检查 1000 个到期 Batch。候选查询只返回 ID，优先有有效
+binding/endpoint 的 channel；暂不可投递的等待项通过既有 `updated_at` 轮转，不新增持久游标。投递前仍逐项
+重新检查时间门、binding、generation 和 lease；较早的慢投递结束后可补查新到期项，同轮不重复检查同一个 Batch。
+这不是整个调度周期的耗时保证，也不是所有数据库查询都已分页：恢复扫描、显式大范围 inspect 及单个超大记录
+仍有各自的成本与 SQLite 输出容量限制。
 
 ### Host Capability Registry
 

@@ -1,6 +1,6 @@
 # First Wake Quickstart
 
-状态：`wake-bridge@0.9.0-preview.19` current onboarding（发布候选）。
+状态：以已发布 `wake-bridge@0.9.0-preview.19` 为安装基线；`main` 后续新增能力须等待下一次发布，见 [验证口径](verification.md)。
 
 这条路径从全新安装走到第一条可审计 wake。先选择与你的宿主匹配的接入路径，再安装和验收。
 

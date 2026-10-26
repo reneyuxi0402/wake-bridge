@@ -42,6 +42,30 @@ credential 不能调用该 endpoint。
 address、lease token、session ref、provider error message、source credential 或 owner token。它只保留安全的 error class；详细 provider
 错误仍留在本地 DB/operator evidence 中，不进入结构化 health payload。
 
+## 安全错误诊断（main 后续维护）
+
+以下新增诊断尚未包含在已发布 preview.19 中。scheduler 的本地 warning 使用固定 JSON 字段 `phase` / `error_class`，
+不输出原始异常、SQL、SQLite stdout/stderr、cause 或请求片段：
+
+```json
+{"phase":"scheduler_tick","error_class":"database_execution_failed"}
+```
+
+`phase` 为 `scheduler_tick`、`scheduler_dispatch` 或 `host_adapter_cleanup`；它定位失败入口，不表示根因已经确定。
+
+| `error_class` | 下一步 |
+| --- | --- |
+| `database_unavailable` | 检查服务运行环境的 SQLite 安装、PATH 和执行权限；运行 release-preflight |
+| `database_output_limit` | 查询结果超过当前缓冲范围；先用 status/小 limit 定位，保留规模信息，不通过删除去重记录解决 |
+| `database_execution_failed` | SQLite 执行失败；检查空间、权限与 preflight/integrity，不能仅凭此类断言锁冲突或损坏 |
+| `database_invalid_json` | SQLite 输出不是预期 JSON；核对 SQLite 可执行文件与版本，不把原始输出贴进公开日志 |
+| `internal_error` | 未分类的内部或 adapter 异常；记录 phase、版本与受影响入口，再做局部复现 |
+
+非契约 HTTP 异常仍返回 500 / `code=internal_error`，新增上述安全 `error_class`，`error` 文案固定。
+既有 SDK 契约校验继续保留其 status/code 和可操作提示；维护 adapter 时，不能把 credential、任意 provider 响应或私有正文装进契约错误。
+这不是日志聚合或调度健康心跳。`/health` 可达只证明 HTTP 服务存活，不证明调度 pass 成功；查看 warning 与现有 queue/source/host status，
+不要因服务进程还在就把故障认作成功投递。
+
 ## 列表读取
 
 `wakebridge events|claims|batches|receipts`、owner HTTP `GET /v1/events|claims|batches|receipts` 与 MCP
@@ -215,9 +239,12 @@ schedule 请求都会被当成新工作再次唤醒。`pending`、`waiting_for_e
 预览、计数和删除在同一个写事务里完成，可以在 daemon 运行时执行。建议首次 `--apply` 前先用
 [release lifecycle](release-lifecycle.md) 的 backup 留一份快照。
 
-## 仍未覆盖的 operator hardening
+Event 与去重记录持续增长是当前合同，不会因为 prune 而变成有固定大小的库。`prune` 也不清理服务日志；
+macOS 文件日志与 Linux journal 的保留由 operator/操作系统配置。观察实际 DB/WAL/日志增长和待办年龄，不以文件暂时未缩小判断清理失败。
+备份及隔离恢复步骤见 [长期维护与恢复演练](release-lifecycle.md#长期维护与隔离恢复演练)。
 
-本票没有承诺 metrics backend、长期 structured log pipeline、dead-letter bulk replay、任意 export、Linux/systemd、端口扫描或自动
-backup drill。`doctor/release-preflight` 继续负责 runtime/schema/config permission readiness；backup/restore 流程见
-[release lifecycle](release-lifecycle.md)。这些剩余项应按独立风险与验收继续推进，不能因有了 status 就宣称 production operations
-全部完成。
+## 运维范围
+
+已提供 secret-free status、wake health、受控 retry、手动 retention、backup/restore 与 macOS/Linux service profile。
+`doctor/release-preflight` 负责 runtime/schema/config permission readiness。没有 metrics backend、长期日志聚合平台、dead-letter bulk replay、
+任意 export、自动备份或自动删除；这些不是使用现有工具的前置条件，也不因本轮维护而新增承诺。

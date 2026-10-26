@@ -108,6 +108,24 @@ Daemon 用 `WAKEBRIDGE_SOURCE_CONNECTORS_FILE=/absolute/path/sources.json` 读�
 
 安装者只负责提供已安装 connector 槽位和本地运行能力。上游 MCP URL、OAuth 或 API key 由 owning agent 使用 connector/provider 自己的配置机制填写和保管；Wake Bridge 不扫描宿主、shell 或浏览器配置，也不复制、修改这些值。
 
+### 有效配置为什么与文件不同
+
+以下解释字段是 `main` 的后续维护改动，未包含在已发布 preview.19 中。行为本身不变：省略 `enabled` 仍为 true，持久控制仍优先。
+
+`source-validate` 只验证文件，返回的 `enabled_semantics` 明确其 `sources[].enabled` 是文件初值，不会读取或更改运行控制。
+运行中 `attention_source_status`、`GET /v1/sources` 及 live operator status 的 source 条目增加：
+
+| 字段 | 表示什么 |
+| --- | --- |
+| `loaded_config_enabled` | daemon 启动时实际加载的配置初值；不代表磁盘文件刚刚改后的内容 |
+| `persisted_control_enabled` | 当前 supervisor 使用的持久控制值；从未设置时为 null |
+| `enabled_source` | `configuration` 或 `persisted_control`，说明最终值取自哪里 |
+| `enabled` | 最终启停值；不等于 connector 健康或本轮已经成功轮询 |
+
+例如加载值 false、持久值 true、最终值 true 表示此前的 enable 正在生效；修改 JSON 不能停用它，应显式调用 disable。
+反之若加载值 true、持久值 false，应完成身份核对后通过 enable 恢复。enable/disable 会即时更新解释字段。
+离线 `wakebridge status` 没有 live supervisor，新解释字段为 null；不要把 null 解释成 false，或据此推断实际文件与轮询状态。
+
 ## 验证与运行
 
 ```bash

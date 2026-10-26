@@ -55,8 +55,8 @@ export function validateSourceConnectorConfig(value: SourceConnectorConfig): Req
 
 export function loadSourceConnectorFile(path: string): Required<SourceConnectorConfig>[] {
   let document: unknown;
-  try { document = JSON.parse(readFileSync(path, "utf8")); } catch (error) {
-    throw new BridgeError(`cannot read source connector file: ${error instanceof Error ? error.message : String(error)}`, "invalid_source_connector_file", 400);
+  try { document = JSON.parse(readFileSync(path, "utf8")); } catch {
+    throw new BridgeError("cannot read source connector file; check the file path and JSON syntax", "invalid_source_connector_file", 400);
   }
   const file = document as SourceConnectorFile;
   if (!file || file.version !== 1 || !Array.isArray(file.sources)) {
@@ -84,8 +84,8 @@ async function connectorJson(fetcher: Fetch, config: Required<SourceConnectorCon
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(15_000),
     });
-  } catch (error) {
-    throw new BridgeError(`source connector ${config.id} is unavailable: ${error instanceof Error ? error.message : String(error)}`, "source_connector_unavailable", 503);
+  } catch {
+    throw new BridgeError(`source connector ${config.id} is unavailable`, "source_connector_unavailable", 503);
   }
   if (!response.ok) {
     const errorClass = response.status === 401 || response.status === 403
@@ -177,12 +177,17 @@ export class SourceSupervisor {
     for (const raw of configs) {
       const config = validateSourceConnectorConfig(raw);
       if (this.slots.has(config.id)) throw new BridgeError(`duplicate source connector id: ${config.id}`, "invalid_source_connector", 400);
-      config.enabled = this.controls.get(config.id) ?? config.enabled;
+      const loadedConfigEnabled = config.enabled;
+      const persistedControlEnabled = this.controls.get(config.id);
+      config.enabled = persistedControlEnabled ?? loadedConfigEnabled;
       const checkpoint = this.runner.checkpoints.get(config.id);
       this.slots.set(config.id, {
         config,
         status: {
           source: config.id, enabled: config.enabled, state: config.enabled ? "idle" : "stopped",
+          loaded_config_enabled: loadedConfigEnabled,
+          persisted_control_enabled: persistedControlEnabled,
+          enabled_source: persistedControlEnabled === null ? "configuration" : "persisted_control",
           last_started_at: null, last_success_at: null, last_error_at: null, last_error_class: null,
           consecutive_failures: 0, next_poll_at: null,
           checkpoint_revision: checkpoint?.revision ?? 0,
@@ -256,6 +261,8 @@ export class SourceSupervisor {
     this.controls.set(source, true);
     slot.config.enabled = true;
     slot.status.enabled = true;
+    slot.status.persisted_control_enabled = true;
+    slot.status.enabled_source = "persisted_control";
     if (!this.stopped && !slot.promise) this.schedule(slot, 0);
     return this.list().find((item) => item.source === source)!;
   }
@@ -265,6 +272,8 @@ export class SourceSupervisor {
     this.controls.set(source, false);
     slot.config.enabled = false;
     slot.status.enabled = false;
+    slot.status.persisted_control_enabled = false;
+    slot.status.enabled_source = "persisted_control";
     if (slot.timer) clearTimeout(slot.timer);
     slot.timer = undefined;
     slot.status.next_poll_at = null;

@@ -673,16 +673,39 @@ export class WakeBridge {
     const claimId = eventState === "matched" ? id("ac") : null;
     const channel = claimId ? this.targetChannel(policy, clean) : null;
     const claimState: ClaimState = "pending";
-    let mergedClaim: AttentionClaim | null = null;
+    let mergedClaim: { id: string } | null = null;
     if (claimId && channel) {
+      let resourceJson: string | null = stableJson(clean.resource);
+      try { JSON.parse(resourceJson); } catch { resourceJson = null; }
       const mergeSemantics = stableJson({ delivery: policy.delivery, batch: policy.batch, expires_after_ms: policy.expires_after_ms ?? null });
-      mergedClaim = this.listClaims({ channel, states: ACTIVE_CLAIM_STATES, limit: 100_000 }).find((candidate) => {
-        if (stableJson(candidate.resource) !== stableJson(clean.resource)) return false;
-        const firstEvent = this.getEvent(candidate.event_ids[0]);
-        const existingPolicy = this.policy(candidate.policy_id, candidate.policy_version);
-        return firstEvent?.source === source && existingPolicy != null
-          && stableJson({ delivery: existingPolicy.delivery, batch: existingPolicy.batch, expires_after_ms: existingPolicy.expires_after_ms ?? null }) === mergeSemantics;
-      }) ?? null;
+      const mergePolicies = this.listPolicies().map(normalizeStoredPolicy).filter((candidate) =>
+        stableJson({ delivery: candidate.delivery, batch: candidate.batch, expires_after_ms: candidate.expires_after_ms ?? null }) === mergeSemantics)
+        .map((candidate) => [candidate.id, candidate.version]);
+      // Compare JSON structure in SQLite before returning a candidate. Text
+      // equality would split resources merely because object keys were reordered;
+      // fullkey keeps array order, and kind keeps true/1 and null/missing distinct.
+      // Optional undefined properties make stableJson non-JSON: no stored JSON
+      // resource can match that canonical string, but ingestion still succeeds.
+      if (resourceJson !== null) mergedClaim = this.db.query<{ id: string }>(`WITH merge_policies AS (
+          SELECT json_extract(value, '$[0]') AS id, json_extract(value, '$[1]') AS version FROM json_each(${sqlJson(mergePolicies)})
+        ), resource_tree AS (
+          SELECT fullkey, CASE WHEN type IN ('integer','real') THEN 'number' ELSE type END AS kind, atom
+          FROM json_tree(${sqlValue(resourceJson)})
+        )
+        SELECT c.id FROM claims c JOIN merge_policies p ON p.id=c.policy_id AND p.version=c.policy_version
+        JOIN events e ON e.id=json_extract(c.event_ids_json, '$[0]') AND e.instance_id=c.instance_id
+        JOIN event_status s ON s.event_id=e.id
+        WHERE c.instance_id=${sqlValue(this.config.instance_id)} AND c.attention_channel=${sqlValue(channel)}
+          AND c.state IN (${ACTIVE_CLAIM_STATES.map(sqlValue).join(",")}) AND e.source=${sqlValue(source)}
+          AND json_extract(c.resource_json, '$.uri')=${sqlValue(clean.resource.uri)}
+          AND NOT EXISTS (
+            SELECT fullkey, CASE WHEN type IN ('integer','real') THEN 'number' ELSE type END, atom FROM json_tree(c.resource_json)
+            EXCEPT SELECT fullkey, kind, atom FROM resource_tree
+          ) AND NOT EXISTS (
+            SELECT fullkey, kind, atom FROM resource_tree
+            EXCEPT SELECT fullkey, CASE WHEN type IN ('integer','real') THEN 'number' ELSE type END, atom FROM json_tree(c.resource_json)
+          )
+        ORDER BY c.created_at ASC, c.rowid ASC LIMIT 1;`)[0] ?? null;
     }
     const statements = [
       `INSERT INTO events(id, instance_id, owner_id, source, type, schema_version, occurred_at, received_at, dedupe_key, coalesce_key, priority_hint, attention_channel_hint, actor_ref, resource_json, metadata_json, payload_preview, matched_policy_id, matched_policy_version)
@@ -1463,12 +1486,17 @@ export class WakeBridge {
     return created;
   }
 
-  /** Advance due claims and freeze eligible claims into durable batches. */
+  /** Advance up to 1000 due claims and freeze up to 1000 eligible claims per pass. */
   tick(): TickResult {
     const nowDate = this.now();
     const now = nowDate.toISOString();
     const result: TickResult = { inactivity_claims_created: this.materializeDueActivityWatches(now), expired_claims: [], deferred_claims: [], eligible_claims: [], batches_created: [], batches_updated: [] };
-    const claims = this.listClaims({ states: ACTIVE_CLAIM_STATES, limit: 100_000 });
+    const claims = this.db.query<Pick<AttentionClaim, "id" | "state" | "policy_id" | "policy_version" | "attention_channel" | "eligible_after" | "expires_at" | "defer_while_presence">>(
+      `SELECT id, state, policy_id, policy_version, attention_channel, eligible_after, expires_at, defer_while_presence
+       FROM claims WHERE instance_id=${sqlValue(this.config.instance_id)} AND state IN (${ACTIVE_CLAIM_STATES.map(sqlValue).join(",")})
+         AND (eligible_after<=${sqlValue(now)} OR expires_at<=${sqlValue(now)})
+       ORDER BY created_at ASC, id ASC LIMIT 1000;`,
+    );
     const transitions: string[] = [];
     for (const claim of claims) {
       if (!ACTIVE_CLAIM_STATES.includes(claim.state)) continue;
@@ -1505,12 +1533,8 @@ export class WakeBridge {
       result.expired_claims = result.expired_claims.filter((claimId) => expired.has(claimId));
     }
 
-    const eligible = this.listClaims({ state: "eligible", limit: 100_000 });
-    const open = this.listBatches({ states: OPEN_BATCH_STATES, limit: 100_000 });
-    const openByKey = new Map<string, WakeBatch>();
-    for (const batch of open) {
-      if (!batch.deadline || batch.deadline > now) openByKey.set(this.batchKey(batch.policy_id, batch.policy_version, batch.attention_channel, batch.coalesce_key ?? null), batch);
-    }
+    const eligible = this.listClaims({ state: "eligible", limit: 1000 });
+    const openByKey = new Map<string, WakeBatch | null>();
     const batchStatements: string[] = [];
     const appendedClaims: Array<{ batchId: string; claimId: string }> = [];
     for (const claim of eligible) {
@@ -1520,6 +1544,16 @@ export class WakeBridge {
       const key = this.batchKey(claim.policy_id, claim.policy_version, claim.attention_channel, coalesce);
       const maxEvents = Math.max(1, Math.floor(policy.batch?.max_events ?? 20));
       let batch = openByKey.get(key);
+      if (batch === undefined) {
+        const row = this.db.query<DbRow>(`SELECT * FROM batches
+          WHERE instance_id=${sqlValue(this.config.instance_id)} AND policy_id=${sqlValue(claim.policy_id)} AND policy_version=${claim.policy_version}
+            AND attention_channel=${sqlValue(claim.attention_channel)} AND coalesce_key IS ${sqlValue(coalesce)}
+            AND state IN (${OPEN_BATCH_STATES.map(sqlValue).join(",")}) AND deadline>${sqlValue(now)}
+            AND json_array_length(claim_ids_json)<${maxEvents}
+          ORDER BY created_at DESC, rowid DESC LIMIT 1;`)[0];
+        batch = row ? this.batchFromRow(row) : null;
+        openByKey.set(key, batch);
+      }
       if (batch && batch.claim_ids.length < maxEvents && batch.deadline && batch.deadline > now) {
         // Both arrays may have grown since planning. Append the current
         // claim's refs only while the destination can still accept it.
@@ -1581,14 +1615,14 @@ export class WakeBridge {
     return result;
   }
 
-  private claimStateSql(claim: AttentionClaim, state: ClaimState, now: string, reason: string): string[] {
+  private claimStateSql(claim: Pick<AttentionClaim, "id" | "state">, state: ClaimState, now: string, reason: string): string[] {
     return [
       `UPDATE claims SET state=${sqlValue(state)}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(claim.id)} AND state=${sqlValue(claim.state)};`,
       `INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT ${sqlValue(claim.id)}, ${sqlValue(claim.state)}, ${sqlValue(state)}, ${sqlValue(reason)}, ${sqlValue(now)} WHERE changes()>0;`,
     ];
   }
 
-  private claimDeferSql(claim: AttentionClaim, eligibleAfter: string, now: string, reason: string): string[] {
+  private claimDeferSql(claim: Pick<AttentionClaim, "id" | "state">, eligibleAfter: string, now: string, reason: string): string[] {
     return [
       `UPDATE claims SET state='deferred', eligible_after=${sqlValue(eligibleAfter)}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(claim.id)} AND state IN ('pending','deferred','eligible');`,
       `INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT ${sqlValue(claim.id)}, ${sqlValue(claim.state)}, 'deferred', ${sqlValue(reason)}, ${sqlValue(now)} WHERE changes()>0;`,
@@ -1730,6 +1764,14 @@ export class WakeBridge {
   }
 
   private markNoEndpoint(batch: WakeBatch, now: string): DispatchResult {
+    if (batch.state === "waiting_for_endpoint") {
+      // A waiting item with no endpoint still gets a turn, but must not keep
+      // the oldest timestamp forever or create another audit on every sweep.
+      this.db.exec(`UPDATE batches SET updated_at=${sqlValue(now)}
+        WHERE id=${sqlValue(batch.id)} AND instance_id=${sqlValue(this.config.instance_id)}
+          AND state='waiting_for_endpoint' AND updated_at=${sqlValue(batch.updated_at)};`);
+      return { batch_id: batch.id, status: "waiting_for_endpoint" };
+    }
     this.db.transaction([
       `UPDATE batches SET state='waiting_for_endpoint', updated_at=${sqlValue(now)}, last_error='no_current_binding' WHERE id=${sqlValue(batch.id)} AND state IN ('pending','retry_wait');`,
       `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at) SELECT ${sqlValue(batch.id)}, state, 'waiting_for_endpoint', 'no_endpoint', ${sqlValue(now)} FROM batches WHERE id=${sqlValue(batch.id)} AND changes()>0;`,
@@ -1933,7 +1975,7 @@ export class WakeBridge {
     return { batch_id: batch.id, status, attempt_id: attemptId, endpoint_id: binding.endpoint_id, generation: binding.generation, error_class: errorClass ?? undefined };
   }
 
-  /** Dispatch due durable batches. The lease CAS prevents double-dispatch. */
+  /** Visit at most 1000 due durable batches per pass. The lease CAS prevents double-dispatch. */
   async dispatchDue(nowDate = this.now()): Promise<DispatchResult[]> {
     const clockStartedAt = this.now().getTime();
     // An explicit date remains a not-earlier-than sweep start, never a way to
@@ -1946,9 +1988,29 @@ export class WakeBridge {
     // reclaim on every sweep; the attempt id CAS below still protects a live
     // worker from a second dispatcher.
     this.recover();
-    const batches = this.listBatches({ states: OPEN_BATCH_STATES, limit: 100_000 });
     const results: DispatchResult[] = [];
-    for (const listed of batches) {
+    const visited = new Set<string>();
+    let candidates: Array<{ id: string }> = [];
+    while (visited.size < 1000) {
+      if (!candidates.length) {
+        const candidatesAt = dispatchNow().toISOString();
+        // Return IDs only. Live bindings take priority; other waiters rotate
+        // using updated_at. rowid retains same-tick batch insertion order.
+        // Refill against the current clock after preceding slow transports,
+        // but never revisit a zero-delay retry within this pass.
+        candidates = this.db.query<{ id: string }>(`SELECT b.id FROM batches b
+          WHERE b.instance_id=${sqlValue(this.config.instance_id)} AND b.state IN (${OPEN_BATCH_STATES.map(sqlValue).join(",")})
+            AND b.not_before<=${sqlValue(candidatesAt)} AND (b.state='waiting_for_endpoint' OR b.deadline IS NULL OR b.deadline<=${sqlValue(candidatesAt)})
+            AND b.id NOT IN (SELECT value FROM json_each(${sqlJson([...visited])}))
+          ORDER BY EXISTS (SELECT 1 FROM bindings binding JOIN endpoints endpoint ON endpoint.id=binding.endpoint_id
+            WHERE binding.instance_id=b.instance_id AND binding.attention_channel=b.attention_channel
+              AND endpoint.lease_expires_at>${sqlValue(candidatesAt)}) DESC,
+            b.updated_at ASC, b.created_at ASC, b.rowid ASC
+          LIMIT ${1000 - visited.size};`);
+      }
+      const listed = candidates.shift();
+      if (!listed) break;
+      visited.add(listed.id);
       const current = this.getBatch(listed.id);
       if (!current || !OPEN_BATCH_STATES.includes(current.state)) continue;
       const gateDate = dispatchNow();
@@ -1974,7 +2036,11 @@ export class WakeBridge {
       }
       const transport = this.chooseTransport(batch, resolved.endpoint);
       if (!transport) {
-        this.db.transaction([
+        if (batch.state === "waiting_for_endpoint") {
+          this.db.exec(`UPDATE batches SET updated_at=${sqlValue(now)}
+            WHERE id=${sqlValue(batch.id)} AND instance_id=${sqlValue(this.config.instance_id)}
+              AND state='waiting_for_endpoint' AND updated_at=${sqlValue(batch.updated_at)};`);
+        } else this.db.transaction([
           `UPDATE batches SET state='waiting_for_endpoint', last_error='no_compatible_transport', updated_at=${sqlValue(now)} WHERE id=${sqlValue(listed.id)} AND state IN ('pending','retry_wait');`,
           `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at) SELECT ${sqlValue(listed.id)}, state, 'waiting_for_endpoint', 'no_transport', ${sqlValue(now)} FROM batches WHERE id=${sqlValue(listed.id)} AND changes()>0;`,
         ]);

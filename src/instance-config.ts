@@ -57,7 +57,7 @@ export function loadInstanceConfig(path: string): WakeBridgeInstanceConfigFile {
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
     if (error instanceof BridgeError) throw error;
-    throw new BridgeError(`instance config is unreadable: ${String(error)}`, "invalid_instance_config", 400);
+    throw new BridgeError("instance config is unreadable; check file access and JSON syntax", "invalid_instance_config", 400);
   }
   const config = parsed as Partial<WakeBridgeInstanceConfigFile>;
   if (config?.version !== 1 || !INSTANCE_ID.test(config.instance_id ?? "") || !INSTANCE_ID.test(config.owner_id ?? "")

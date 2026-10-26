@@ -19,6 +19,7 @@ import { WakeBridge } from "./core.js";
 import { CURRENT_SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION } from "./db.js";
 import { instanceConfigSecurity, loadInstanceConfig } from "./instance-config.js";
 import { RELEASE_VERSION } from "./version.js";
+import { assertSqliteSuccess, DatabaseError } from "./ops-error.js";
 
 export { RELEASE_VERSION } from "./version.js";
 export const MINIMUM_NODE_MAJOR = 20;
@@ -90,8 +91,7 @@ function sqlite(args: string[], input?: string): string {
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024,
   });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`sqlite3 failed (${result.status}): ${(result.stderr || result.stdout || "").trim()}`);
+  assertSqliteSuccess(result);
   return (result.stdout || "").trim();
 }
 
@@ -123,8 +123,12 @@ function sqliteVersion(): { available: boolean; version: string | null; json_out
 
 function sqliteScalar(dbPath: string, sql: string, field: string): string {
   const output = sqlite(["-batch", "-json", dbPath], `${sql}\n`);
-  const parsed = JSON.parse(output) as Array<Record<string, unknown>>;
-  return String(parsed[0]?.[field] ?? "");
+  try {
+    const parsed = JSON.parse(output) as Array<Record<string, unknown>>;
+    return String(parsed[0]?.[field] ?? "");
+  } catch {
+    throw new DatabaseError("database_invalid_json");
+  }
 }
 
 export function databaseStatus(dbPath: string): { schema_version: number; integrity: "ok" | "failed" } {
@@ -136,7 +140,9 @@ export function databaseStatus(dbPath: string): { schema_version: number; integr
 
 function checkpointDatabase(dbPath: string): void {
   const output = sqlite(["-batch", "-json", dbPath], ".timeout 5000\nPRAGMA wal_checkpoint(TRUNCATE);\n");
-  const row = (JSON.parse(output) as Array<{ busy?: number; log?: number; checkpointed?: number }>)[0];
+  let row: { busy?: number; log?: number; checkpointed?: number } | undefined;
+  try { row = (JSON.parse(output) as Array<typeof row>)[0]; }
+  catch { throw new DatabaseError("database_invalid_json"); }
   if (!row || row.busy !== 0 || row.log !== row.checkpointed) {
     throw new Error("database WAL checkpoint is busy; stop the daemon before this operation");
   }
@@ -226,8 +232,8 @@ function readBackupManifest(backupDir: string): { manifest: BackupManifest; data
   let manifest: BackupManifest;
   try {
     manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as BackupManifest;
-  } catch (error) {
-    throw new Error(`backup manifest is unreadable: ${String(error)}`);
+  } catch {
+    throw new Error("backup manifest is unreadable; check the file and JSON syntax");
   }
   if (manifest?.format_version !== 1 || manifest.database_file !== "wake-bridge.sqlite"
     || typeof manifest.instance_id !== "string" || typeof manifest.database_sha256 !== "string"
@@ -286,9 +292,10 @@ export function backupInstance(configPath: string, outputDirectory: string): Bac
 function replaceDatabase(dbPath: string, sourcePath: string): void {
   const destination = resolve(dbPath);
   const temporary = join(dirname(destination), `.${basename(destination)}.${randomBytes(8).toString("hex")}.restore`);
-  copyFileSync(sourcePath, temporary);
   let replaced = false;
   try {
+    // A failed copy (for example ENOSPC) can leave a partial destination too.
+    copyFileSync(sourcePath, temporary);
     chmodSync(temporary, 0o600);
     if (databaseStatus(temporary).integrity !== "ok") throw new Error("restore candidate failed quick_check");
     for (const suffix of ["-wal", "-shm"]) {

@@ -14,7 +14,7 @@ Wake Bridge 是一个 local-first 的 **agent attention scheduler and delivery c
 - versioned event/source/transport SDK；
 - out-of-process loopback Host Adapter Contract；
 - 可选的 Claude CLI 在线会话 Host Adapter（Claude custom channels research preview）；
-- 默认关闭的小机知道与 Gmail Source Connector；
+- 可选的小机知道与 Gmail Source Connector，示例配置显式关闭；
 - secret-free operator status、确认超时告警、dead-letter 受控重试与显式的历史清理（retention）；
 - 单 Agent Principal / 单 Agent Space / 单 daemon 的本地部署。
 
@@ -25,8 +25,8 @@ Wake Bridge 是一个 local-first 的 **agent attention scheduler and delivery c
 
 从 [First Wake Quickstart](docs/quickstart.md) 开始。它覆盖 clean install、Agent Space 初始化、仓库外 Host Adapter、第一条受控 wake、MCP、presence、self-commitment 与可选 Source Connector。完整公共文档见 [在线文档导航](https://github.com/reneyuxi0402/wake-bridge/blob/main/docs/README.md)（npm 包只附带运行所需文档）。
 
-当前源码为 `0.9.0-preview.19` 发布候选，见 [release notes](docs/releases/0.9.0-preview.19.md)；须通过同一 tag commit 的四组 CI 后才发布到 npm `latest`。
-已发布的 `0.9.0-preview.18` 不改写。包内置可选的 Claude CLI 在线会话 Host Adapter
+已发布基线为 `0.9.0-preview.19`，见 [release notes](docs/releases/0.9.0-preview.19.md)。`main` 的后续维护改动不自动进入 npm；
+已发布 tarball/tag 不改写，源码与发行证据的区别见 [公开验证口径](docs/verification.md)。包内置可选的 Claude CLI 在线会话 Host Adapter
 与 Gmail Source Connector；已在
 Ubuntu 22.04 LTS x64 实机完成连续两轮 reboot canary，并在 Ubuntu 24.04 x64 CI 验证。Wake Bridge 本身不内置任何具体
 agent runtime；未列入官方 adapter 的宿主仍须已有或实现一个能精确控制目标 session 的 adapter。
@@ -118,9 +118,10 @@ Source Connector 只报告事实，不能选择 endpoint、绕过 policy 或注�
 
 ### 首发 catalog
 
-Connector 采用“可发现、可选配置、默认关闭”的模型。默认提供不表示默认登录、创建 checkpoint、轮询或唤醒。
+Connector 采用“可发现、可选配置、示例显式关闭”的模型。默认提供不表示默认登录、创建 checkpoint、轮询或唤醒。
+手写配置省略 `enabled` 仍默认启用；已有持久 enable/disable 控制优先于文件初值，见 [有效配置解释](docs/operations/source-connectors.md#有效配置为什么与文件不同)。
 
-| Connector | 状态 | 默认行为 |
+| Connector | 状态 | 示例配置 / 接入要求 |
 | --- | --- | --- |
 | 小机知道 | official optional | disabled；verify + from-now bootstrap 后才能 enable |
 | Gmail | official optional | disabled；verify + from-now bootstrap + UAT 后才能 enable |

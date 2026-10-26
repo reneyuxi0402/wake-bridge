@@ -57,6 +57,9 @@ export interface OperatorStatus {
     items: Array<{
       source: string;
       enabled: boolean;
+      loaded_config_enabled: boolean | null;
+      persisted_control_enabled: boolean | null;
+      enabled_source: SourceSupervisorStatus["enabled_source"] | null;
       runtime_state: string | null;
       last_error_class: string | null;
       consecutive_failures: number;
@@ -104,6 +107,9 @@ function offlineSources(bridge: WakeBridge): OperatorStatus["sources"]["items"] 
   `).map((row) => ({
     source: String(row.source),
     enabled: Boolean(Number(row.enabled)),
+    loaded_config_enabled: null,
+    persisted_control_enabled: null,
+    enabled_source: null,
     runtime_state: null,
     last_error_class: null,
     consecutive_failures: 0,
@@ -118,6 +124,9 @@ function sourceItems(bridge: WakeBridge, sources?: SourceSupervisorStatus[]): Op
   return sources.map((source) => ({
     source: source.source,
     enabled: source.enabled,
+    loaded_config_enabled: source.loaded_config_enabled,
+    persisted_control_enabled: source.persisted_control_enabled,
+    enabled_source: source.enabled_source,
     runtime_state: source.state,
     last_error_class: safeErrorClass(source.last_error_class),
     consecutive_failures: source.consecutive_failures,

@@ -479,7 +479,15 @@ async function main(): Promise<void> {
     const path = option(parsed.options, "connectors", process.env.WAKEBRIDGE_SOURCE_CONNECTORS_FILE);
     if (!path) throw new Error("--connectors is required");
     const sources = loadSourceConnectorFile(path);
-    output({ ok: true, sources });
+    output({
+      ok: true,
+      sources,
+      enabled_semantics: {
+        omitted_defaults_to: true,
+        scope: "configuration_initial_value",
+        runtime_control: "persisted enable/disable overrides this initial value",
+      },
+    });
     return;
   }
   if (parsed.command === "botlingknows-connector") {

@@ -15,6 +15,7 @@ import { validateSourceIngestCredential, type SourceIngestCredential } from "./s
 import { validatePolicyFile } from "./policy-control.js";
 import { operatorStatus, retryDeadLetter } from "./operator-control.js";
 import { MIN_SECRET_LENGTH, SECRET_ADDRESS_KEY } from "./validation.js";
+import { operationalErrorClass } from "./ops-error.js";
 
 export interface DaemonOptions {
   host?: string;
@@ -40,6 +41,10 @@ function jsonResponse(response: ServerResponse, status: number, value: unknown):
   response.end(body);
 }
 
+function operationalWarning(phase: "scheduler_tick" | "scheduler_dispatch" | "host_adapter_cleanup", error: unknown): void {
+  process.emitWarning(JSON.stringify({ phase, error_class: operationalErrorClass(error) }));
+}
+
 async function readJson(request: IncomingMessage): Promise<Record<string, any>> {
   const chunks: Buffer[] = [];
   let bytes = 0;
@@ -54,8 +59,8 @@ async function readJson(request: IncomingMessage): Promise<Record<string, any>> 
     const value = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("JSON object required");
     return value as Record<string, any>;
-  } catch (error) {
-    throw new BridgeError(`invalid JSON body: ${String(error)}`, "invalid_json", 400);
+  } catch {
+    throw new BridgeError("invalid JSON body: expected a JSON object", "invalid_json", 400);
   }
 }
 
@@ -235,7 +240,9 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
         try {
           adapter.validateEndpoint?.(registration);
         } catch (error) {
-          throw new BridgeError(`host session route is invalid: ${String(error)}`, "invalid_host_session", 400);
+          throw new BridgeError(error instanceof WakeBridgeSdkError
+            ? `host session route is invalid: ${error.message}`
+            : "host session route is invalid; check the adapter route configuration", "invalid_host_session", 400);
         }
         const currentGeneration = bridge.getBinding(attentionChannel)?.generation ?? 0;
         const endpoint = bridge.registerEndpoint(registration);
@@ -546,9 +553,11 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
       }
       jsonResponse(response, 404, { error: "not_found" });
     } catch (error) {
-      const contractError = error instanceof WakeBridgeSdkError;
-      const status = contractError ? error.status : 500;
-      jsonResponse(response, status, { error: error instanceof Error ? error.message : String(error), code: contractError ? error.code : "internal_error" });
+      if (error instanceof WakeBridgeSdkError) {
+        jsonResponse(response, error.status, { error: error.message, code: error.code });
+      } else {
+        jsonResponse(response, 500, { error: "Wake Bridge operation failed", code: "internal_error", error_class: operationalErrorClass(error) });
+      }
     }
   });
   const port = options.port ?? 4311;
@@ -569,7 +578,7 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
     try {
       await adapterRegistry.stop();
     } catch (stopError) {
-      process.emitWarning(`wakebridge host adapter cleanup failed: ${String(stopError)}`);
+      operationalWarning("host_adapter_cleanup", stopError);
     }
     await new Promise<void>((resolve) => server.close(() => resolve()));
     throw error;
@@ -578,20 +587,22 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
   const schedulerInterval = options.scheduler_interval_ms ?? 1_000;
   let schedulerTimer: NodeJS.Timeout | undefined;
   let schedulerPromise: Promise<void> | undefined;
-  const runScheduler = async (): Promise<void> => {
-    bridge.tick();
-    await bridge.dispatchDue();
-  };
   const triggerScheduler = () => {
     // Keep the one real pass promise authoritative.  An interval tick while
     // dispatch is awaiting a transport must not replace it with an already
     // resolved "skipped" promise, or close() could return while that worker
     // still owns a durable lease.
     if (schedulerPromise) return;
+    let phase: "scheduler_tick" | "scheduler_dispatch" = "scheduler_tick";
+    const runScheduler = async (): Promise<void> => {
+      bridge.tick();
+      phase = "scheduler_dispatch";
+      await bridge.dispatchDue();
+    };
     const pass = runScheduler().catch((error) => {
       // Keep the daemon alive; the durable event/claim/outbox state remains
       // inspectable and the next interval retries the scheduler pass.
-      process.emitWarning(`wakebridge scheduler pass failed: ${String(error)}`);
+      operationalWarning(phase, error);
     });
     schedulerPromise = pass;
     void pass.finally(() => {

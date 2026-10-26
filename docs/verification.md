@@ -1,11 +1,29 @@
 # 公开验证口径
 
-状态：`wake-bridge@0.9.0-preview.19` release candidate；发布后由 npm `latest` 与 GitHub pre-release 提供同一 tarball。
+## 发行基线与源码增量
 
-本轮发布前本地回归共 409 项测试通过（392 项 Vitest + 17 项 Claude adapter Node 测试）。
-macOS / Ubuntu 24.04 × Node 20 / 24 四组 CI 均已有通过记录；其中 macOS Node 20 首轮停滞后取消，重跑通过，原因尚未确定。
-这些是发布前回归证据，不等于 `v0.9.0-preview.19` 的真实 tag 发布门禁已验收。发布 workflow 必须在同一 tag commit 上重新运行四组 CI，
-四组全部成功才可打包发布。本轮没有新增真实模型端到端 UAT，不扩大既有宿主或平台验证承诺。
+`wake-bridge@0.9.0-preview.19` 已发布。其 tag 提交为 `e62eaa34238445bb92f6c14805f1fd1f3631f804`，
+[发布工作流](https://github.com/reneyuxi0402/wake-bridge/actions/runs/40104086788) 在同 tag 的四组 CI 全部成功后发布；
+macOS Node 20 首轮停滞取消、第二次通过的事实保留，根因未确认。npm 与 GitHub 提供同字节 tarball，SHA-256 为
+`76ce265fb0be12e413f1747058e211ec040bcb6a5f8eaba83197613d0b64fec5`。该发行基线每组产品回归为 392 项 Vitest + 17 项 Node 测试。
+
+`main` 含发行后的文档与 CI 诊断改动，以及后续维护代码；它们不会改变已发布的 preview.19。
+新增的安全错误分类、source 有效配置解释、积压调度边界和恢复失败清理须经下一次版本发布才可从 npm 安装。
+当前维护回归不新增真实模型 UAT、不扩大宿主或平台支持范围；具体测试覆盖与限制见下文及相关运维页。
+
+### 后续维护的回归边界
+
+- 安全诊断：以合成敏感标记覆盖 SQLite 失败、配置解析、scheduler warning、HTTP 未分类异常和 connector 网络错误；不宣称任意第三方 adapter 的日志已自动脱敏。
+- 有效 source 配置：覆盖省略 `enabled`、持久开关覆盖、重启、enable/disable 与离线不可观察；不改变原默认值或优先级。
+- 积压：真实 SQLite 中放入超过十万条未来 Claim / Batch，确认新到期工作仍可推进；另覆盖无关超大字段、每轮预算、重启、并发 CAS、等待项轮转与 resource 等价性。
+  千条预算/轮转测试对固定 fixture 的重复只读查询使用局部快照，排序与写事务仍走真实 DB；它们是正确性回归，不是完整子进程吞吐基准。
+- 维护恢复：校验坏备份、坏 manifest、损坏原库的隔离恢复、prune 后去重保留，以及备份写入/恢复复制的一次性 ENOSPC 注入。
+  不模拟真实磁盘耗尽，也不保证持续文件系统故障下自动回滚一定成功。
+
+上述积压边界不意味着全部 SQL 都已分页、无限数据量可用或延迟有 SLA；显式大范围 inspect、单个超大记录与恢复扫描仍有容量/成本边界。
+两小时独立试用和合成回归也不替代多日真实运行证据。操作与备份敏感性见 [维护及恢复演练](operations/release-lifecycle.md#长期维护与隔离恢复演练)。
+
+## 验证范围
 
 公共仓库用以下证据验证自身，不用具体宿主产品的现场结果代替通用契约：
 

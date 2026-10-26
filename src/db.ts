@@ -3,6 +3,20 @@ import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
+import { assertSqliteSuccess, DatabaseError } from "./ops-error.js";
+
+function sqliteRows(output: string): Record<string, unknown>[] {
+  if (!output.trim()) return [];
+  try {
+    const parsed: unknown = JSON.parse(output);
+    if (!Array.isArray(parsed) || parsed.some((row) => !row || typeof row !== "object" || Array.isArray(row))) {
+      throw new Error("expected SQLite rows");
+    }
+    return parsed as Record<string, unknown>[];
+  } catch {
+    throw new DatabaseError("database_invalid_json");
+  }
+}
 
 /**
  * A deliberately small SQLite bridge.  Wake Bridge is local-first and the
@@ -45,12 +59,11 @@ export class SqliteDatabase {
       encoding: "utf8",
       maxBuffer: 1024 * 1024,
     });
-    if (result.error) throw result.error;
-    if (result.status !== 0) throw new Error(`sqlite3 failed (${result.status}): ${(result.stderr || result.stdout || "").trim()}`);
-    const output = (result.stdout || "").trim();
-    if (!output) return 0;
-    const rows = JSON.parse(output) as Array<{ user_version?: number }>;
-    return Number(rows[0]?.user_version ?? 0);
+    assertSqliteSuccess(result);
+    const rows = sqliteRows(result.stdout || "");
+    const version = rows[0]?.user_version ?? 0;
+    if (!Number.isSafeInteger(version) || Number(version) < 0) throw new DatabaseError("database_invalid_json");
+    return Number(version);
   }
 
   private configure(): void {
@@ -243,10 +256,7 @@ COMMIT;`);
       encoding: "utf8",
       maxBuffer: 16 * 1024 * 1024,
     });
-    if (result.error) throw result.error;
-    if (result.status !== 0) {
-      throw new Error(`sqlite3 failed (${result.status}): ${(result.stderr || result.stdout || "").trim()}`);
-    }
+    assertSqliteSuccess(result);
   }
 
   query<T extends Record<string, unknown> = Record<string, unknown>>(sql: string): T[] {
@@ -255,18 +265,8 @@ COMMIT;`);
       encoding: "utf8",
       maxBuffer: 32 * 1024 * 1024,
     });
-    if (result.error) throw result.error;
-    if (result.status !== 0) {
-      throw new Error(`sqlite3 failed (${result.status}): ${(result.stderr || result.stdout || "").trim()}`);
-    }
-    const output = (result.stdout || "").trim();
-    if (!output) return [];
-    try {
-      const parsed = JSON.parse(output) as unknown;
-      return Array.isArray(parsed) ? (parsed as T[]) : [];
-    } catch (error) {
-      throw new Error(`sqlite3 returned invalid JSON: ${String(error)}; output=${output.slice(0, 500)}`);
-    }
+    assertSqliteSuccess(result);
+    return sqliteRows(result.stdout || "") as T[];
   }
 
   transaction(statements: string[]): void {

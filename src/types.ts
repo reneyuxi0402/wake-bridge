@@ -142,6 +142,10 @@ export type SourceSupervisorState = "idle" | "polling" | "healthy" | "backoff" |
 export interface SourceSupervisorStatus {
   source: string;
   enabled: boolean;
+  /** Initial enabled value from the daemon's loaded configuration, not the current file on disk. */
+  loaded_config_enabled: boolean;
+  persisted_control_enabled: boolean | null;
+  enabled_source: "configuration" | "persisted_control";
   state: SourceSupervisorState;
   last_started_at: string | null;
   last_success_at: string | null;

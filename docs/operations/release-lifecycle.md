@@ -1,6 +1,6 @@
 # Release install, upgrade, backup, and rollback
 
-状态：engineering preview current runbook（2026-09-12）。Wake Bridge 发布包只支持 Host Adapter Contract；
+状态：engineering preview current runbook；发布基线与后续源码改动见 [验证口径](../verification.md)。Wake Bridge 发布包只支持 Host Adapter Contract；
 完成本页不等于任何具体 agent 产品获得兼容性或时延保证。
 
 ## 支持矩阵
@@ -150,8 +150,9 @@ wakebridge upgrade \
   --confirm-offline
 ```
 
-upgrade 顺序固定：`offline assertion → WAL checkpoint → quick_check → verified backup → migrate → schema 8 + quick_check`。任何 migration/验证失败都会用刚创建的
-backup 自动恢复原 DB。schema 8 再执行为 no-op；schema 6、7 是本 preview 的升级基线；更旧或更新的 schema 都拒绝。
+upgrade 顺序固定：`offline assertion → WAL checkpoint → quick_check → verified backup → migrate → schema 8 + quick_check`。migration/验证失败会用刚创建的
+backup 自动尝试恢复原 DB；持续的磁盘或权限故障也可能阻止恢复，须保全 verified backup 并先排除故障。schema 8 再执行为 no-op；
+schema 6、7 是本 preview 的升级基线；更旧或更新的 schema 都拒绝。
 
 ## 数据 rollback / restore
 
@@ -168,8 +169,9 @@ wakebridge restore \
   --confirm-offline
 ```
 
-restore 先为当前 DB 再做一份 verified rollback snapshot，校验目标 manifest、checksum、schema 与 integrity，然后原子替换 DB；
-失败时自动把刚才的 current snapshot 放回。恢复旧 schema 后不要再用新 daemon 打开 DB：先安装与该 schema 配套的旧 tarball，
+restore 先校验目标 manifest、checksum、schema 与 integrity，再对当前 DB 做 checkpoint 和 verified rollback snapshot，然后原子替换 DB；
+替换失败时自动尝试把刚才的 current snapshot 放回；这一步仍可能因持续的磁盘或权限故障失败，须保留 rollback snapshot。
+恢复旧 schema 后不要再用新 daemon 打开 DB：先安装与该 schema 配套的旧 tarball，
 或重新执行新版本显式 upgrade。
 
 代码 rollback 与数据 rollback 是两个独立动作：
@@ -180,6 +182,37 @@ restore 先为当前 DB 再做一份 verified rollback snapshot，校验目标 m
 4. `npm install --global /absolute/path/old-release.tgz`；
 5. 用旧版本的 `release-preflight/doctor` 验证后再 bootstrap LaunchAgent。
 
+## 长期维护与隔离恢复演练
+
+已有 backup/restore/prune 是手动工具，没有自动备份、自动清库或自动缩小 DB。先按实际事件量和可接受数据损失决定备份间隔，
+每次升级或首次 `prune --apply` 前另做备份；不要把“命令返回成功”当作已经验证恢复。建议定期以及升级后做以下隔离演练：
+
+1. 用 `release-preflight --config ...` 检查原实例；记录 `status` 中队列、失败类别及 source checkpoint 时间，并观察 DB/WAL 与日志的实际大小趋势。
+2. 用上述 `backup` 命令创建全新的备份目录，另行安全保管配置/凭据。完整 DB 备份含资源引用、业务元数据和 endpoint route credential，也可能包含 transport 错误里的敏感内容；按敏感数据保管，不能公开上传。
+3. 在新的私有目录初始化同一 `instance_id` / `owner_id` 的临时实例；不配置 source、host 或服务，不启动 daemon。它会生成自己的 owner credential，不复用生产 owner credential；恢复的 DB 仍带有原 endpoint 等记录，因此整个演练保持离线。
+4. 用已有 `restore` 恢复到这个临时实例，再执行 `release-preflight` 与 `status`；核对关键未完成事项和 checkpoint，与备份时的预期相符。
+5. 记录备份时间、恢复耗时、校验结果和可接受的恢复点；确认没有进程使用临时目录后，只清理这个演练目录，不删除原库或备份。
+
+命令示例（将所有占位路径和身份替换为本次精确目标；备份 schema 必须与所用 package 兼容）：
+
+```sh
+wakebridge init --data-dir /absolute/private/recovery-drill \
+  --instance-id my-agent --owner-id my-agent --timezone Asia/Shanghai
+wakebridge restore --config /absolute/private/recovery-drill/wakebridge.config.json \
+  --backup /absolute/private/backups/verified-snapshot \
+  --rollback-output /absolute/private/backups/drill-empty-before-restore \
+  --confirm-instance-id my-agent --confirm-offline
+wakebridge release-preflight --config /absolute/private/recovery-drill/wakebridge.config.json
+wakebridge status --config /absolute/private/recovery-drill/wakebridge.config.json
+```
+
+**原库损坏时不要直接覆盖。** 正常 restore 要先备份当前库，因此当前库损坏或不存在时会拒绝；这不是自动灾难恢复入口。
+停止原 daemon，原样保全 DB/WAL/SHM 与配置，再用上面的独立目录从已验证备份恢复。恢复结果确认后，切换服务路径与凭据属于另一个显式操作，
+不能在演练时启动第二个相同身份的生产实例。不要通过删除 WAL、改 manifest checksum 或绕过 integrity 检查“修复”原库。
+
+故障回归覆盖：损坏备份及重算 checksum 后的坏 DB 被拒绝、备份 manifest 写入失败不留下成功样子的备份、恢复复制中断清理临时文件并保留当前数据、
+保留损坏原库后恢复到隔离实例，以及 prune 后去重与未完成工作跨备份恢复不丢失。写入/复制 ENOSPC 是受控故障注入，不声称已测试真实磁盘耗尽或所有文件系统故障。
+
 ## Uninstall
 
 先执行 install 返回的 `unload_command`，再删除 profile：
@@ -189,7 +222,7 @@ wakebridge service uninstall --config /absolute/path/wakebridge.config.json
 npm uninstall --global wake-bridge
 ```
 
-`service uninstall` 只删除该 instance 的 plist，明确保留 config、DB、backups 和 logs。数据删除不属于 uninstall；如确需删除，
+`service uninstall` 只删除该 instance 的 plist 或 systemd user unit，明确保留 config、DB、backups 和 logs。数据删除不属于 uninstall；如确需删除，
 由 operator 在完成 verified backup 后另行处理明确目录。
 
 ## Artifact 内容

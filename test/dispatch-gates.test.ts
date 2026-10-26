@@ -625,7 +625,9 @@ describe("dispatch-time expiry, quiet hours and presence gates", () => {
         ? [...statements, "INSERT INTO deliberately_missing_gate_test_table VALUES(1);"] : statements,
     ));
 
-    await expect(bridge.dispatchDue()).rejects.toThrow(/deliberately_missing_gate_test_table/);
+    await expect(bridge.dispatchDue()).rejects.toMatchObject({
+      error_class: "database_execution_failed", message: "SQLite execution failed",
+    });
 
     expect(bridge.getBatch(batch.id)).toMatchObject({ state: "pending", claim_ids: batch.claim_ids, event_ids: batch.event_ids });
     expect(bridge.getClaim(emitted.claim!.id)?.state).toBe("batched");
