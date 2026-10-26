@@ -248,9 +248,12 @@ versioned WakePayload reference。具体 bridge/frontend/runner 保留在宿主�
 - warm 与 cold 不并发双投；
 - 分开记录 transport accepted、agent completed、agent seen、event consumed/acted。
 
-`main` 的后续维护中，每次 `dispatchDue()` 至多检查 1000 个到期 Batch。候选查询只返回 ID，优先有有效
+`main` 的后续维护中，每次 `dispatchDue()` 至多检查 1000 个到期 Batch，并在 Batch 之间检查一秒软时间预算。
+预算使用单调运行时钟，与可注入的业务时钟分开；每轮至少允许一个候选推进，预算耗尽后让出事件循环，余量留给下一轮。
+候选查询只返回 ID，优先有有效
 binding/endpoint 的 channel；暂不可投递的等待项通过既有 `updated_at` 轮转，不新增持久游标。投递前仍逐项
 重新检查时间门、binding、generation 和 lease；较早的慢投递结束后可补查新到期项，同轮不重复检查同一个 Batch。
+预算不会打断正在执行的同步 SQL 或 transport，也不限制 tick 阶段，不能保证整个调用一秒返回。
 这不是整个调度周期的耗时保证，也不是所有数据库查询都已分页：恢复扫描、显式大范围 inspect 及单个超大记录
 仍有各自的成本与 SQLite 输出容量限制。
 

@@ -15,7 +15,7 @@ import { validateSourceIngestCredential, type SourceIngestCredential } from "./s
 import { validatePolicyFile } from "./policy-control.js";
 import { operatorStatus, retryDeadLetter } from "./operator-control.js";
 import { MIN_SECRET_LENGTH, SECRET_ADDRESS_KEY } from "./validation.js";
-import { operationalErrorClass } from "./ops-error.js";
+import { operationalErrorClass, operationalErrorType } from "./ops-error.js";
 
 export interface DaemonOptions {
   host?: string;
@@ -42,7 +42,11 @@ function jsonResponse(response: ServerResponse, status: number, value: unknown):
 }
 
 function operationalWarning(phase: "scheduler_tick" | "scheduler_dispatch" | "host_adapter_cleanup", error: unknown): void {
-  process.emitWarning(JSON.stringify({ phase, error_class: operationalErrorClass(error) }));
+  const error_class = operationalErrorClass(error);
+  process.emitWarning(JSON.stringify({
+    phase, error_class,
+    ...(error_class === "internal_error" ? { error_type: operationalErrorType(error) } : {}),
+  }));
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, any>> {

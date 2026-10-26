@@ -205,7 +205,7 @@ function adapter(overrides: Partial<HostAdapter>): HostAdapter {
 }
 
 describe("safe daemon failure surfaces", () => {
-  it.each(["tick", "dispatchDue"] as const)("reports %s failures as only a safe phase and error class", async (method) => {
+  it.each(["tick", "dispatchDue"] as const)("reports %s failures with a safe phase, class, and fixed type", async (method) => {
     const bridge = fixtureBridge();
     const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
     if (method === "tick") vi.spyOn(bridge, method).mockImplementation(() => { throw new Error(PRIVATE); });
@@ -214,10 +214,41 @@ describe("safe daemon failure surfaces", () => {
     try {
       await vi.waitFor(() => expect(warning).toHaveBeenCalledTimes(1));
       expect(JSON.parse(String(warning.mock.calls[0][0]))).toEqual({
-        phase: method === "tick" ? "scheduler_tick" : "scheduler_dispatch", error_class: "internal_error",
+        phase: method === "tick" ? "scheduler_tick" : "scheduler_dispatch", error_class: "internal_error", error_type: "Error",
       });
       expect(JSON.stringify(warning.mock.calls)).not.toContain(PRIVATE);
       expect((await fetch(`${origin(daemon)}/health`)).status).toBe(200);
+    } finally { await daemon.close(); bridge.close(); }
+  });
+
+  it.each([
+    ...[
+      new TypeError(PRIVATE), new RangeError(PRIVATE), new ReferenceError(PRIVATE), new SyntaxError(PRIVATE),
+      new URIError(PRIVATE), new EvalError(PRIVATE), new Error(PRIVATE), new AggregateError([], PRIVATE),
+    ].map((error) => {
+      const errorType = error.name;
+      return {
+        label: `renamed ${errorType}`, errorType,
+        error: Object.assign(error, { name: PRIVATE, message: PRIVATE, stack: `${PRIVATE}\n at ${PRIVATE_PATH}`, path: PRIVATE_PATH }),
+      };
+    }),
+    { label: "Error renamed to a different built-in", error: Object.assign(new Error(PRIVATE), { name: "TypeError" }), errorType: "Error" },
+    ...[
+      PRIVATE, 42, null, undefined, true, 1n, Symbol(PRIVATE),
+      { name: "TypeError", message: PRIVATE, stack: PRIVATE_PATH },
+      { name: PRIVATE, message: PRIVATE, stack: PRIVATE_PATH, toString: () => PRIVATE },
+    ].map((error, index) => ({ label: `non-Error value ${index}`, error, errorType: "unknown" })),
+  ])("uses only a fixed error type for $label", async ({ error, errorType }) => {
+    const bridge = fixtureBridge();
+    const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    vi.spyOn(bridge, "tick").mockImplementation(() => { throw error; });
+    const daemon = await daemonFor(bridge, { scheduler_interval_ms: 60_000 });
+    try {
+      await vi.waitFor(() => expect(warning).toHaveBeenCalledTimes(1));
+      expect(JSON.parse(String(warning.mock.calls[0][0]))).toEqual({
+        phase: "scheduler_tick", error_class: "internal_error", error_type: errorType,
+      });
+      expect(JSON.stringify(warning.mock.calls)).not.toContain(PRIVATE);
     } finally { await daemon.close(); bridge.close(); }
   });
 
@@ -245,7 +276,7 @@ describe("safe daemon failure surfaces", () => {
       await expect(daemonFor(bridge, { host_adapters: [adapter({
         start: () => { throw startupError; }, stop: () => { throw new Error(PRIVATE); },
       })] })).rejects.toBe(startupError);
-      expect(JSON.parse(String(warning.mock.calls[0][0]))).toEqual({ phase: "host_adapter_cleanup", error_class: "internal_error" });
+      expect(JSON.parse(String(warning.mock.calls[0][0]))).toEqual({ phase: "host_adapter_cleanup", error_class: "internal_error", error_type: "Error" });
       expect(JSON.stringify(warning.mock.calls)).not.toContain(PRIVATE);
     } finally { bridge.close(); }
   });

@@ -1,9 +1,12 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
+import type { AddressInfo } from "node:net";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WakeBridge } from "../src/core.js";
+import { startDaemon } from "../src/daemon.js";
 import { sqlJson, sqlValue } from "../src/db.js";
 import type { BridgeConfig, PolicyRule, ResourceRef, WakeTransport } from "../src/types.js";
 
@@ -122,6 +125,108 @@ afterEach(async () => {
 });
 
 describe("bounded scheduler backlog work", () => {
+  it("ends a sweep on monotonic elapsed time, yields to I/O, and keeps remaining work durable", async () => {
+    const { bridge, bind, calls } = setup();
+    bind("default");
+    for (let n = 0; n < 3; n++) fresh(bridge, `time-budget-${n}`);
+    const batches = bridge.tick().batches_created;
+    expect(batches).toHaveLength(3);
+    const businessTime = bridge.nowIso();
+    let elapsed = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+    const transport = bridge.transports.get("bounded-test")!;
+    const dispatch = transport.dispatch.bind(transport);
+    vi.spyOn(transport, "dispatch").mockImplementation((context) => {
+      elapsed += 1000;
+      return dispatch(context);
+    });
+    let ioTurn = false;
+    const immediate = setImmediate().then(() => { ioTurn = true; });
+    const first = await bridge.dispatchDue();
+    expect(first).toHaveLength(1);
+    expect(ioTurn, "Budget exhaustion must let pending I/O run, not only resolve a microtask").toBe(true);
+    await immediate;
+    expect(bridge.nowIso()).toBe(businessTime);
+    expect(bridge.listBatches().filter((batch) => batch.state === "pending")).toHaveLength(2);
+    expect(await bridge.dispatchDue()).toHaveLength(1);
+    expect(await bridge.dispatchDue()).toHaveLength(1);
+    expect(new Set(calls)).toEqual(new Set(batches));
+    expect(calls).toHaveLength(3);
+  });
+
+  it("allows one candidate to progress even when recovery has exhausted the budget", async () => {
+    const { bridge, bind, calls } = setup();
+    bind("default");
+    fresh(bridge, "slow-recovery-1");
+    fresh(bridge, "slow-recovery-2");
+    bridge.tick();
+    let elapsed = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+    const recovery = bridge as unknown as { recover(): void };
+    const recover = recovery.recover.bind(bridge);
+    vi.spyOn(recovery, "recover").mockImplementation(() => {
+      const result = recover();
+      elapsed += 2000;
+      return result;
+    });
+    expect(await bridge.dispatchDue()).toHaveLength(1);
+    expect(await bridge.dispatchDue()).toHaveLength(1);
+    expect(new Set(calls).size).toBe(2);
+  });
+
+  it("continues below 1000ms and stops at the exact budget boundary", async () => {
+    const { bridge, bind, calls } = setup();
+    bind("default");
+    for (let n = 0; n < 3; n++) fresh(bridge, `budget-boundary-${n}`);
+    bridge.tick();
+    let elapsed = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+    const transport = bridge.transports.get("bounded-test")!;
+    const dispatch = transport.dispatch.bind(transport);
+    vi.spyOn(transport, "dispatch").mockImplementation((context) => {
+      elapsed = calls.length === 0 ? 999 : 1000;
+      return dispatch(context);
+    });
+    expect(await bridge.dispatchDue()).toHaveLength(2);
+    expect(calls).toHaveLength(2);
+    expect(await bridge.dispatchDue()).toHaveLength(1);
+    expect(new Set(calls).size).toBe(3);
+  });
+
+  it("serves HTTP between budgeted passes through unbound synchronous work", async () => {
+    const { bridge, advance } = setup();
+    for (let n = 0; n < 3; n++) fresh(bridge, `unbound-budget-${n}`);
+    const batches = bridge.tick().batches_created;
+    const daemon = await startDaemon(bridge.config, {
+      bridge, host: "127.0.0.1", port: 0, scheduler_interval_ms: 0, unsafe_no_auth: true,
+    });
+    try {
+      let elapsed = 0;
+      vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+      const getBatch = bridge.getBatch.bind(bridge);
+      vi.spyOn(bridge, "getBatch").mockImplementation((id) => {
+        const batch = getBatch(id);
+        elapsed += 1000;
+        return batch;
+      });
+      const origin = `http://127.0.0.1:${(daemon.address as AddressInfo).port}`;
+      const visited: string[] = [];
+      for (let n = 0; n < 3; n++) {
+        advance(1);
+        const health = fetch(`${origin}/health`);
+        const results = await bridge.dispatchDue();
+        expect(results).toHaveLength(1);
+        expect(results[0].status).toBe("waiting_for_endpoint");
+        visited.push(results[0].batch_id);
+        const response = await health;
+        expect(response.status).toBe(200);
+        await response.arrayBuffer();
+      }
+      expect(new Set(visited)).toEqual(new Set(batches));
+      expect(bridge.listBatches().every((batch) => batch.attempt === 0)).toBe(true);
+    } finally { await daemon.close(); }
+  });
+
   it("finds new due work behind more than 100k future active claims and open batches", async () => {
     const { bridge, bind, calls } = setup();
     insertClaims(bridge, 100_005);
@@ -214,6 +319,8 @@ describe("bounded scheduler backlog work", () => {
   });
 
   it("prioritizes a bound channel over an old unbound waiting page", async () => {
+    // Isolate the count/order limit from the independently tested time budget.
+    vi.spyOn(performance, "now").mockReturnValue(0);
     const { bridge, bind, calls } = setup();
     insertBatches(bridge, 1001, { waiting: true, channel: "unbound" });
     bind("default");
@@ -232,10 +339,11 @@ describe("bounded scheduler backlog work", () => {
 
     expect(await bridge.dispatchDue()).toMatchObject([{ batch_id: batchId, status: "accepted" }]);
     expect(calls).toEqual([batchId]);
-    expect(cachedFutureReads()).toBe(999);
+    expect(cachedFutureReads(), "Future-row snapshot misses: check the fixture's exact getBatch SQL against the current query").toBe(999);
   });
 
   it("rotates more than 1000 no-compatible waiters so later bound work is not starved", async () => {
+    vi.spyOn(performance, "now").mockReturnValue(0);
     const { bridge, bind, calls, advance } = setup();
     bind("unsupported", "unregistered-kind");
     bind("default");
@@ -287,7 +395,7 @@ describe("bounded scheduler backlog work", () => {
     const second = await bridge.dispatchDue();
     expect(second.length).toBeLessThanOrEqual(1000);
     expect(calls).toEqual([batchId]);
-    expect(cachedFutureReads()).toBe(998);
+    expect(cachedFutureReads(), "Future-row snapshot misses: check the fixture's exact getBatch SQL against the current query").toBe(998);
     expect(bridge.db.query("SELECT COUNT(*) AS count FROM receipts r WHERE r.batch_id LIKE 'wb_bulk_%';"))
       .toEqual([{ count: 0 }]);
   });

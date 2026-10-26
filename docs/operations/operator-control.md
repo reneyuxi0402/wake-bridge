@@ -62,6 +62,8 @@ address、lease token、session ref、provider error message、source credential
 | `internal_error` | 未分类的内部或 adapter 异常；记录 phase、版本与受影响入口，再做局部复现 |
 
 非契约 HTTP 异常仍返回 500 / `code=internal_error`，新增上述安全 `error_class`，`error` 文案固定。
+本地 warning 的 `internal_error` 另带固定白名单 `error_type`（如 `TypeError` 或 `Error`，无法识别时为 `unknown`），
+不读取任意异常的 `name`、message 或 stack；HTTP 响应不增加此字段。类型只辅助定位，不证明具体根因。
 既有 SDK 契约校验继续保留其 status/code 和可操作提示；维护 adapter 时，不能把 credential、任意 provider 响应或私有正文装进契约错误。
 这不是日志聚合或调度健康心跳。`/health` 可达只证明 HTTP 服务存活，不证明调度 pass 成功；查看 warning 与现有 queue/source/host status，
 不要因服务进程还在就把故障认作成功投递。

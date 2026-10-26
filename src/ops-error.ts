@@ -40,3 +40,16 @@ export function operationalErrorClass(error: unknown): DatabaseErrorClass | "int
     ? error.error_class
     : "internal_error";
 }
+
+/** Fixed local diagnostic labels only; never read arbitrary names or stacks. */
+export function operationalErrorType(error: unknown) {
+  if (error instanceof TypeError) return "TypeError";
+  if (error instanceof RangeError) return "RangeError";
+  if (error instanceof ReferenceError) return "ReferenceError";
+  if (error instanceof SyntaxError) return "SyntaxError";
+  if (error instanceof URIError) return "URIError";
+  if (error instanceof EvalError) return "EvalError";
+  if (error instanceof AggregateError) return "AggregateError";
+  if (error instanceof Error) return "Error";
+  return "unknown";
+}

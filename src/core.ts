@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import { performance } from "node:perf_hooks";
+import { setImmediate } from "node:timers/promises";
 import { SqliteDatabase, sqlJson, sqlValue } from "./db.js";
 import {
   addMs,
@@ -1975,8 +1977,9 @@ export class WakeBridge {
     return { batch_id: batch.id, status, attempt_id: attemptId, endpoint_id: binding.endpoint_id, generation: binding.generation, error_class: errorClass ?? undefined };
   }
 
-  /** Visit at most 1000 due durable batches per pass. The lease CAS prevents double-dispatch. */
+  /** Visit at most 1000 due batches, stopping between batches after a 1s soft budget. */
   async dispatchDue(nowDate = this.now()): Promise<DispatchResult[]> {
+    const sweepStartedAt = performance.now();
     const clockStartedAt = this.now().getTime();
     // An explicit date remains a not-earlier-than sweep start, never a way to
     // create historical leases. Advance that start with actual clock elapsed
@@ -1992,6 +1995,13 @@ export class WakeBridge {
     const visited = new Set<string>();
     let candidates: Array<{ id: string }> = [];
     while (visited.size < 1000) {
+      // Use a monotonic runtime clock, not the injectable event/lease clock.
+      // Always allow one candidate to progress. This cannot interrupt recovery,
+      // an individual SQL call or an in-flight transport, so it is not a timeout.
+      if (visited.size > 0 && performance.now() - sweepStartedAt >= 1000) {
+        await setImmediate();
+        break;
+      }
       if (!candidates.length) {
         const candidatesAt = dispatchNow().toISOString();
         // Return IDs only. Live bindings take priority; other waiters rotate
