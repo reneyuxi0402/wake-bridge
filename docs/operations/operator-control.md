@@ -131,6 +131,21 @@ batch 创建时 `not_before` 为当前时间，因此零长度合批窗口下 `n
 `409 batch_not_dispatched`，确认同 batch 当前 accepted attempt 后可重试同一 ack；不要吞掉错误或对 stale generation 等所有 409 无限重试。
 回读权威来源并审阅/处理对应 claim 后才 consume。最终验收是一次真实 agent ack 加实际来源处理，不是 daemon active、打印 envelope 或 transport 202。
 
+### 投递失败与确认超时
+
+这几种读数属于不同阶段，不能互相替代：
+
+| 读数 | 含义与后续行为 |
+| --- | --- |
+| attempt `failed`，batch `retry_wait` | 本次尝试未确认接受，且结果可重试；按 `not_before` 及派发条件继续尝试。HTTP 超时可能发生在宿主接收之后，`failed` 不证明宿主未收到。 |
+| attempt `failed`，batch `dead_letter` | 本次结果不可重试；先核对拒绝原因，不能把所有 `failed` 都当成同一种网络超时。 |
+| batch `needs_attention`，`last_error=ack_timeout` | 已有接受证据，但等待 agent ack 超时；不会因此自动重投已接受的 delivery。 |
+
+`needs_attention` 不是通用的“接收未知”状态，也可能有 `empty_batch` 等其他原因，须一起看 `last_error` 和同 batch 的证据。
+当前 transport contract 没有 `transport_unknown` 返回状态；本地 HTTP 超时默认是可重试失败，不会直接进入 `needs_attention`。
+若该次合法 nonce echo 已证明注入，Core 可按 `host_attested` 收尾为 `seen`，即使 HTTP 响应超时；这仍不是 agent ack/consume。
+核对宿主实际接收记录与稳定 wake/claim 标识的去重范围，不要用伪造 202、代 ack/consume 或盲目手工补投消除这些状态。
+
 ## Retryable transport failure
 
 自 `0.9.0-preview.18` 起，对未被接受、可重试且未提供有效 `retry_after_ms` 的 transport 结果使用有上限的指数退避：默认等待

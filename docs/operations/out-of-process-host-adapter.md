@@ -144,8 +144,13 @@ batch 的 `deadline` 则是合批窗口结束时间，不是本次 HTTP 调用�
 `not_before`。接受后的 `ack_timeout_ms` 另管 agent 确认，三者不要互相替代。见 [时间边界对照](operator-control.md#不要混用三种时间边界)。
 
 请求超时/响应丢失时，Core 没有 HTTP 接受证据，但宿主可能已经接收；不要据此断言未投递，也不要自动 ack/consume。
+本地 HTTP transport 超时返回 `accepted: false, retryable: true`（`host_timeout`）；若没有该次有效 nonce echo，
+Core 将 attempt 记为 `failed`、batch 转为 `retry_wait`。这里的 `failed` 表示本次尝试未取得接受确认，不是宿主未收到的证明。
+当前 contract 没有 `transport_unknown` 返回状态，HTTP 超时也不会自动转成 `needs_attention`；“接收未知”只能描述证据边界，
+不能用来替代既有返回语义。状态区别见 [投递失败与确认超时](operator-control.md#投递失败与确认超时)。
 Core retry 会创建新的 `attempt_id`。同 attempt 的进程内去重不足以防止跨 retry 或 adapter 重启后的重复业务投递；
-按宿主现有能力使用稳定 wake/claim 标识做幂等处理，并明确其范围，不宣称跨重启 exactly-once。没有可确认的接受机制时，应保留失败/未知证据。
+按宿主现有能力使用稳定 wake/claim 标识做幂等处理，并明确其范围，不宣称跨重启 exactly-once。没有可确认的接受机制时，
+应保留实际响应状态（若有）、耗时和关联的 batch/attempt 标识，明确接收尚未证实；不能因“也许已收到”而返回 202。
 若 host 确实观察到该次 delivery 注入相同 session/generation，可使用下一节的现有 nonce echo；不能凭 handler 收到请求或 agent 正在运行伪造 echo。
 
 ## 4. Activity 与更高层 receipt
