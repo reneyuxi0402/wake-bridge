@@ -62,6 +62,78 @@ function deadLetter(configValue: BridgeConfig): { bridge: WakeBridge; batchId: s
 }
 
 describe("operator status and dead-letter recovery", () => {
+  it("reports only retained channel-ingest suppressions, bounds recent diagnostics, and stays read-only and instance-scoped", () => {
+    const configValue = { ...config(), max_channels: 1 };
+    let now = Date.parse("2026-10-30T10:00:00.000Z");
+    const bridge = new WakeBridge(configValue, { clock: () => new Date(now) });
+    const other = new WakeBridge({ ...configValue, instance_id: "other-instance" }, { clock: () => new Date(now) });
+    try {
+      expect(operatorStatus(bridge)).toMatchObject({ ingest: { channel_suppressions: {
+        counts: { channel_deleted: 0, channel_limit_reached: 0 }, latest_at: null, recent: [],
+      } } });
+      const input = (key: string, channel: string) => ({
+        type: "channel.event", dedupe_key: key, attention_channel_hint: channel,
+        resource: { uri: "secret://resource-private-token" }, payload_preview: "payload-private-token", metadata: { token: "metadata-private-token" },
+      });
+      const expired = bridge.emit("fixture", input("expired-on-delete", "deleted"));
+      bridge.deleteChannel("deleted");
+      expect(bridge.getEvent(expired.event.id)?.state).toBe("expired");
+      bridge.updatePolicy({ id: "deleted-route", version: 3, match: { type: "routed.deleted" }, target: { attention_channel: "deleted" }, delivery: { mode: "immediate" } });
+      const deletedInput = { ...input("deleted-at-ingest", "raw-hint-not-the-route"), type: "routed.deleted" };
+      const deleted = bridge.emit("fixture", deletedInput);
+      expect(deleted).toMatchObject({ suppressed: true, duplicate: false });
+      expect(bridge.emit("fixture", deletedInput)).toMatchObject({ suppressed: true, duplicate: true, event: { id: deleted.event.id } });
+      expect(operatorStatus(bridge).ingest.channel_suppressions.recent).toEqual([{
+        event_id: deleted.event.id, source: "fixture", matched_policy_id: "deleted-route", matched_policy_version: 3,
+        reason: "channel_deleted", at: new Date(now).toISOString(),
+      }]);
+      bridge.createChannel({ attention_channel: "active", name: "Active" });
+      const limitedIds: string[] = [];
+      for (let index = 0; index < 22; index += 1) {
+        now += 1000;
+        const limitedInput = input(`limited-${index}`, `missing-${index}`);
+        const limited = bridge.emit("fixture", limitedInput);
+        expect(limited).toMatchObject({ suppressed: true, duplicate: false });
+        expect(bridge.emit("fixture", limitedInput)).toMatchObject({ suppressed: true, duplicate: true });
+        limitedIds.push(limited.event.id);
+      }
+      const latestAt = new Date(now).toISOString();
+      now += 1000;
+      bridge.updatePolicy({ id: "silent", version: 1, match: { type: "policy.silent" }, delivery: { mode: "suppress" } });
+      expect(bridge.emit("fixture", { ...input("policy-suppression", "deleted"), type: "policy.silent" }).suppressed).toBe(true);
+      other.createChannel({ attention_channel: "other-deleted", name: "Other" });
+      other.deleteChannel("other-deleted");
+      other.emit("other-source", input("other-suppression", "other-deleted"));
+      const snapshot = () => ({
+        events: bridge.db.query("SELECT id, instance_id FROM events ORDER BY id;"),
+        statuses: bridge.db.query("SELECT * FROM event_status ORDER BY event_id;"),
+        transitions: bridge.db.query("SELECT * FROM event_transitions ORDER BY seq;"),
+      });
+      const before = snapshot();
+      const options = { sources: [{
+        source: "fixture", enabled: true, loaded_config_enabled: true, persisted_control_enabled: null, enabled_source: "configuration" as const,
+        state: "healthy" as const, last_started_at: null, last_success_at: latestAt, last_error_at: null, last_error_class: null,
+        consecutive_failures: 0, next_poll_at: null, checkpoint_revision: 0, checkpoint_subject_ref: null, checkpoint_binding_fingerprint: null, last_run: null,
+      }] };
+      const status = operatorStatus(bridge, options);
+      expect(status).toMatchObject({ health: "healthy", attention_required: false, sources: { counts: { healthy: 1 } } });
+      const diagnostics = status.ingest.channel_suppressions;
+      expect(diagnostics).toEqual({
+        counts: { channel_deleted: 1, channel_limit_reached: 22 }, latest_at: latestAt,
+        recent: expect.any(Array),
+      });
+      expect(diagnostics.recent).toHaveLength(20);
+      expect(diagnostics.recent.map((item) => item.event_id)).toEqual(limitedIds.slice(-20).reverse());
+      expect(diagnostics.recent.map((item) => Object.keys(item).sort())).toEqual(Array.from({ length: 20 }, () => ["at", "event_id", "matched_policy_id", "matched_policy_version", "reason", "source"]));
+      expect(diagnostics.recent).toMatchObject(Array.from({ length: 20 }, () => ({ source: "fixture", reason: "channel_limit_reached", at: expect.any(String) })));
+      expect(operatorStatus(bridge, options)).toEqual(status);
+      expect(snapshot()).toEqual(before);
+      const encoded = JSON.stringify(status);
+      for (const secret of ["resource-private-token", "payload-private-token", "metadata-private-token", "raw-hint-not-the-route", "other-source"]) expect(encoded).not.toContain(secret);
+      expect(operatorStatus(other).ingest.channel_suppressions).toMatchObject({ counts: { channel_deleted: 1, channel_limit_reached: 0 } });
+    } finally { other.close(); bridge.close(); }
+  });
+
   it("reports secret-free queue/host/source health without mutating an expired or failed queue", async () => {
     const fixture = deadLetter(config());
     try {

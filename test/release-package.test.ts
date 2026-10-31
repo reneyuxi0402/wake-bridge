@@ -86,6 +86,7 @@ describe("published tarball", () => {
         "docs/operations/linux-vps.md",
         "docs/operations/operator-control.md",
         "docs/operations/out-of-process-host-adapter.md",
+        "docs/operations/multi-agent-channels.md",
         "docs/operations/connector-catalog.md",
         "docs/adapters/botlingknows.md",
         "docs/adapters/gmail.md",
@@ -107,6 +108,7 @@ describe("published tarball", () => {
         "docs/releases/0.9.0-preview.18.md",
         "docs/releases/0.9.0-preview.19.md",
         "docs/releases/0.9.0-preview.20.md",
+        "docs/releases/0.9.0-preview.21.md",
         "host-adapters/claude-cli/src/cli.mjs",
         "host-adapters/claude-cli/src/launcher.mjs",
         "host-adapters/claude-cli/src/channel.mjs",
@@ -136,7 +138,7 @@ describe("published tarball", () => {
         import { EVENT_CONTRACT_VERSION, validateWakeEventInput } from "wake-bridge/event";
         import { SOURCE_ADAPTER_CONTRACT_VERSION, validateSourceManifest, type PullSourceAdapter } from "wake-bridge/source";
         import {
-          HOST_ADAPTER_CONTRACT_VERSION, LOCAL_HOST_PROTOCOL_VERSION, HostSessionClient,
+          HOST_ADAPTER_CONTRACT_VERSION, LOCAL_HOST_PROTOCOL_VERSION, HostSessionClient, WakeBridgeSdkError,
           validateHostAdapterManifest, validateLocalHostDeliveryRequest, type HostAdapter
         } from "wake-bridge/transport";
 
@@ -164,6 +166,22 @@ describe("published tarball", () => {
         validateSourceManifest(source.manifest);
         validateHostAdapterManifest(host.manifest);
         if (LOCAL_HOST_PROTOCOL_VERSION !== 1 || typeof HostSessionClient !== "function") throw new Error("local host protocol missing");
+        if (typeof HostSessionClient.prototype.openChannels !== "function" || typeof HostSessionClient.prototype.leases !== "function") throw new Error("multi-channel SDK missing");
+        // Compile the new API against installed declarations, without a network call.
+        async function multiChannelTypes(client: HostSessionClient) {
+          const registration = await client.openChannels({
+            session_ref: "fixture-session", attention_channels: ["life", "work"],
+            route_origin: "http://127.0.0.1:4393", route_token: "fixture-route-token-0123456789abcdef"
+          });
+          const leases = client.leases(registration);
+          const generation: number = leases[0].generation;
+          const channel: string = registration.bindings[0].attention_channel;
+          return { generation, channel };
+        }
+        void multiChannelTypes;
+        const sdkError = new WakeBridgeSdkError("failed", "host_session_request_failed", 409, "endpoint_fenced");
+        const remoteCode: string | undefined = sdkError.remote_code;
+        if (remoteCode !== "endpoint_fenced") throw new Error("structured SDK error missing");
         validateLocalHostDeliveryRequest({
           protocol_version: 1, attempt_id: "attempt", delivery_nonce: "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
           wake: { schema_version: 1, instance_id: "i", wake_batch_id: "b", attention_channel: "default", claim_refs: [], binding_generation: 1 }
@@ -246,7 +264,7 @@ describe("published tarball", () => {
         adapters: [{
           id: "installed-host", adapter_kind: "installed_host_bridge", adapter_version: "1.0.0",
           host_kind: "fixture_runner", tested_host_versions: ["fixture"], token_env: "WAKEBRIDGE_INSTALLED_HOST_TOKEN",
-          attention_channels: ["default"], capabilities: { warm_resume: true, exact_live_route: true, requires_live_binding: true },
+          attention_channels: ["default", "work", "reading"], capabilities: { warm_resume: true, exact_live_route: true, requires_live_binding: true },
           receipt_upper_bound: "host_accepted",
         }],
       }));
@@ -269,6 +287,31 @@ describe("published tarball", () => {
         route_token: routeToken,
       });
       const ownerHeaders = { authorization: `Bearer ${initializedConfig.admin_token}`, "content-type": "application/json" };
+      const createdChannelResponse = await fetch(`${externalDaemon.address}/v1/channels`, {
+        method: "POST", headers: ownerHeaders, body: JSON.stringify({ name: "Reading", attention_channel: "reading" }),
+      });
+      expect(createdChannelResponse.status).toBe(201);
+      expect(await createdChannelResponse.json()).toMatchObject({ channel: { attention_channel: "reading", name: "Reading" } });
+      const renamedChannelResponse = await fetch(`${externalDaemon.address}/v1/channels/reading`, {
+        method: "PATCH", headers: ownerHeaders, body: JSON.stringify({ name: "Papers" }),
+      });
+      expect(renamedChannelResponse.status).toBe(200);
+      expect(await renamedChannelResponse.json()).toMatchObject({ channel: { attention_channel: "reading", name: "Papers" } });
+      const readingSession = await sessionClient.open({
+        session_ref: "installed-reading", attention_channel: "reading",
+        route_origin: `http://127.0.0.1:${routePort}`, route_token: routeToken,
+      });
+      const inUseChannelResponse = await fetch(`${externalDaemon.address}/v1/channels/reading`, { method: "DELETE", headers: ownerHeaders });
+      expect(inUseChannelResponse.status).toBe(409);
+      expect(await inUseChannelResponse.json()).toMatchObject({
+        code: "channel_in_use",
+        usage: { binding: { endpoint_id: readingSession.endpoint.id, generation: readingSession.binding.generation } },
+      });
+      const deletedChannelResponse = await fetch(`${externalDaemon.address}/v1/channels/reading`, {
+        method: "DELETE", headers: ownerHeaders, body: JSON.stringify({ force: true }),
+      });
+      expect(deletedChannelResponse.status).toBe(200);
+      expect(await deletedChannelResponse.json()).toMatchObject({ channel: { attention_channel: "reading", deleted_at: expect.any(String) } });
       const emittedResponse = await fetch(`${externalDaemon.address}/v1/events`, {
         method: "POST", headers: ownerHeaders,
         body: JSON.stringify({ source: "package", type: "external.host", dedupe_key: "external-host-1", resource: { uri: "package://external-host" } }),
@@ -288,6 +331,25 @@ describe("published tarball", () => {
         protocol_version: 1, wake: { attention_channel: "default", claim_refs: [{ resource: { uri: "package://external-host" } }] },
       });
       await sessionClient.close(sessionClient.lease(session));
+      const sharedSession = await sessionClient.openChannels({
+        session_ref: "installed-session", attention_channels: ["default", "work"],
+        route_origin: `http://127.0.0.1:${routePort}`, route_token: routeToken,
+      });
+      const sharedLeases = sessionClient.leases(sharedSession);
+      expect(sharedLeases.map((lease) => lease.attention_channel)).toEqual(["default", "work"]);
+      expect(new Set(sharedLeases.map((lease) => lease.lease_token)).size).toBe(1);
+      expect(sharedLeases[0].generation).toBe(session.binding.generation + 1);
+      expect((await fetch(`${externalDaemon.address}/v1/events`, {
+        method: "POST", headers: ownerHeaders,
+        body: JSON.stringify({ source: "package", type: "external.host", dedupe_key: "external-host-work", attention_channel_hint: "work", resource: { uri: "package://work" } }),
+      })).status).toBe(201);
+      expect((await fetch(`${externalDaemon.address}/v1/tick`, { method: "POST", headers: ownerHeaders, body: "{}" })).status).toBe(200);
+      const sharedDispatch = await fetch(`${externalDaemon.address}/v1/dispatch`, { method: "POST", headers: ownerHeaders, body: "{}" });
+      expect(await sharedDispatch.json()).toMatchObject({ results: [{ status: "accepted" }] });
+      expect(deliveries).toHaveLength(3);
+      expect(installedTransport.validateLocalHostDeliveryRequest(deliveries[2]).wake.attention_channel).toBe("work");
+      await sessionClient.renew(sharedLeases[0]);
+      await sessionClient.close(sharedLeases[0]);
       externalDaemon.child.kill("SIGTERM");
       await new Promise<void>((done) => externalDaemon.child.once("exit", () => done()));
       children.delete(externalDaemon.child);
@@ -296,7 +358,7 @@ describe("published tarball", () => {
 
       expect(JSON.parse(run(binary, [
         "backup", "--config", initialized.config_path, "--output", join(root, "backup"),
-      ], installRoot))).toMatchObject({ ok: true, backup: { instance_id: "blackbox", source_schema_version: 8 } });
+      ], installRoot))).toMatchObject({ ok: true, backup: { instance_id: "blackbox", source_schema_version: 9 } });
 
       execFileSync("sqlite3", [initializedConfig.db_path], {
         input: "DELETE FROM schema_migrations WHERE version > 6; PRAGMA user_version=6;\n",
@@ -308,7 +370,7 @@ describe("published tarball", () => {
       const preUpgrade = join(root, "pre-upgrade");
       expect(JSON.parse(run(binary, [
         "upgrade", "--config", initialized.config_path, "--backup-output", preUpgrade, "--confirm-offline",
-      ], installRoot))).toMatchObject({ ok: true, upgraded: true, from_schema: 6, to_schema: 8 });
+      ], installRoot))).toMatchObject({ ok: true, upgraded: true, from_schema: 6, to_schema: 9 });
       expect(JSON.parse(run(binary, [
         "restore", "--config", initialized.config_path, "--backup", preUpgrade,
         "--rollback-output", join(root, "pre-restore"), "--confirm-instance-id", "blackbox", "--confirm-offline",
@@ -316,9 +378,15 @@ describe("published tarball", () => {
       expect(execFileSync("sqlite3", [initializedConfig.db_path, "PRAGMA user_version;"], { encoding: "utf8" }).trim()).toBe("6");
       expect(JSON.parse(run(binary, [
         "upgrade", "--config", initialized.config_path, "--backup-output", join(root, "second-pre-upgrade"), "--confirm-offline",
-      ], installRoot))).toMatchObject({ ok: true, upgraded: true, from_schema: 6, to_schema: 8 });
+      ], installRoot))).toMatchObject({ ok: true, upgraded: true, from_schema: 6, to_schema: 9 });
 
       const configSecret = initializedConfig.admin_token;
+      const sibling = JSON.parse(run(binary, [
+        "init", "--data-dir", join(root, "agent-b"), "--instance-id", "agent-b", "--owner-id", "agent-b", "--timezone", "UTC",
+      ], installRoot)) as { config_path: string };
+      const siblingConfig = JSON.parse(readFileSync(sibling.config_path, "utf8"));
+      expect(siblingConfig.db_path).not.toBe(initializedConfig.db_path);
+      expect(siblingConfig.admin_token).not.toBe(configSecret);
       if (process.platform === "darwin") {
         const launchAgents = join(root, "LaunchAgents");
         const installedService = JSON.parse(run(binary, [
@@ -327,9 +395,19 @@ describe("published tarball", () => {
         ], installRoot)) as { service: { profile: string; plist_path: string } };
         expect(installedService.service.profile).toBe("launch_agent");
         expect(readFileSync(installedService.service.plist_path, "utf8")).not.toContain(configSecret);
+        const siblingService = JSON.parse(run(binary, [
+          "service", "install", "--config", sibling.config_path, "--port", "4312",
+          "--launch-agents-dir", launchAgents, "--logs-dir", join(root, "logs-b"),
+        ], installRoot)).service;
+        expect(siblingService.plist_path).not.toBe(installedService.service.plist_path);
+        const siblingProfile = readFileSync(siblingService.plist_path, "utf8");
+        expect(siblingProfile).toContain("4312");
+        expect(siblingProfile).toContain(sibling.config_path);
+        expect(siblingProfile).not.toContain(siblingConfig.admin_token);
         expect(JSON.parse(run(binary, [
           "service", "uninstall", "--config", initialized.config_path, "--launch-agents-dir", launchAgents,
         ], installRoot))).toMatchObject({ service: { removed: true, data_preserved: true } });
+        expect(existsSync(siblingService.plist_path)).toBe(true);
       } else if (process.platform === "linux") {
         const systemdUserDirectory = join(root, "systemd", "user");
         const installedService = JSON.parse(run(binary, [
@@ -338,9 +416,19 @@ describe("published tarball", () => {
         ], installRoot)) as { service: { profile: string; unit_path: string } };
         expect(installedService.service.profile).toBe("systemd_user");
         expect(readFileSync(installedService.service.unit_path, "utf8")).not.toContain(configSecret);
+        const siblingService = JSON.parse(run(binary, [
+          "service", "install", "--config", sibling.config_path, "--port", "4312",
+          "--systemd-user-dir", systemdUserDirectory,
+        ], installRoot)).service;
+        expect(siblingService.unit_path).not.toBe(installedService.service.unit_path);
+        const siblingProfile = readFileSync(siblingService.unit_path, "utf8");
+        expect(siblingProfile).toContain("4312");
+        expect(siblingProfile).toContain(sibling.config_path);
+        expect(siblingProfile).not.toContain(siblingConfig.admin_token);
         expect(JSON.parse(run(binary, [
           "service", "uninstall", "--config", initialized.config_path, "--systemd-user-dir", systemdUserDirectory,
         ], installRoot))).toMatchObject({ service: { removed: true, data_preserved: true } });
+        expect(existsSync(siblingService.unit_path)).toBe(true);
       } else {
         throw new Error(`release package test does not support ${process.platform}`);
       }

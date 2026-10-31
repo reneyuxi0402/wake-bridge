@@ -1,6 +1,6 @@
 # 架构与路由
 
-状态：`0.9.0-preview.20` current public contract。首版 deployment topology 为单 Agent Space
+状态：`0.9.0-preview.21` 未发布源码候选；npm 基线仍为 preview.20。首版 deployment topology 为单 Agent Space
 instance；共享 service 多 Space 已延后为 post-MVP proposal。
 
 ## 1. 系统边界
@@ -154,10 +154,20 @@ busy behavior 不进入 public policy v1，也不能经 Core install/config 绕�
 
 ### Release / schema lifecycle
 
-schema 8 是当前 package baseline，6 是最低显式升级版本。新 DB 只由 `init` bootstrap；普通 daemon、CLI、MCP 与 Core
+schema 8 是已发布 preview.20 package baseline；未发布 preview.21 候选使用 schema 9，6 是最低显式升级版本。
+schema 9 增加 channel 的稳定 ID、显示名和删除标记，旧引用经显式升级回填；删除不销毁审计历史，也不复用旧 ID。
+新 DB 只由 `init` bootstrap；普通 daemon、CLI、MCP 与 Core
 打开旧 schema 时 fail closed，不拥有 migration authority。`wakebridge upgrade` 先创建并验证一致性 SQLite snapshot，
 再显式授权 migration；迁移后 schema/integrity 验证失败会自动恢复 snapshot。restore 同样要求 offline assertion、精确
 instance id、checksum/integrity，并在替换前再备份 current DB。
+旧 preview.20 不能打开 schema 9；回退旧包必须恢复升级前 verified backup，不能仅更换二进制。
+Channel 删除默认检查当前 binding、启用 activity watch 与当前启用受支持 policy 的字面 target，使用中返回
+`409 channel_in_use` 和安全 usage；agent MCP/owner HTTP 的严格 boolean `force:true` 才允许强制删除。
+事务保留历史、禁止复用已删 ID，不提供 channel restore；在途宿主消息无法追回，`channel_deleted` 是后续 ack/consume 的终态。
+来源 emit 的隐式目标额度不足或已删时只落盘 suppressed 事件（`channel_limit_reached` / `channel_deleted`），
+无新 channel/claim，cursor 继续；显式 create/schedule/watch/host 注册额度不足仍429。释放额度不自动补发，原 dedupe 重放不变。
+Operator 的 `ingest.channel_suppressions` 与 MCP 紧凑事件的 `suppression_reason` 只暴露安全诊断；
+计数基于保留历史，不含 payload，不单独改变 health/attention_required，也不增加 incident。
 
 macOS service profile 使用 LaunchAgent；plist 固定 loopback、config 与已安装 CLI 路径，不保存 owner credential。
 `0.9.0-preview.9` 增加 Linux systemd user service，同样固定 loopback，并只引用 mode-600 environment/source credential
@@ -225,6 +235,7 @@ Inactivity Watch 是 agent 显式登记的调度条件，不是 Bridge 自动推
   launcher/SessionStart/loop，也不把 harness 漏登记解释为需要自动修复的记忆故障；
 - endpoint registry、attention channel 与 binding generation 全部以 Agent Space 为作用域；两个独立实例中的 agent
   可各自拥有名为 `life` 的 channel，互不冲突；
+- channel 是 Space 内路由标签，不是 agent 身份或独立安全域；多 agent 仍隔离实例和凭据；
 - endpoint 是 agent 或其 harness 显式声明、由 Host Adapter 验证并实现投递的 opaque delivery target，
   不是 Agent Principal；
 - Host Adapter 不替 agent 选择“当前窗口”，只验证/实现它所声明的 endpoint route 并报告 transport capability；
@@ -232,6 +243,8 @@ Inactivity Watch 是 agent 显式登记的调度条件，不是 Bridge 自动推
 - 未 register 或不再匹配 binding generation 的 caller，除 status/inspect 外不能创建或改变 endpoint-scoped state；
 - binding key 为 attention channel；
 - 多个 channel 可以显式指向同一 endpoint；
+- 未发布 preview.21 候选通过 `openChannels` 一次登记共享 session 的完整 channel 集合，endpoint/token 共享，
+  binding generation 仍逐 channel；重登与 close 的影响范围见 [多路接入](operations/multi-agent-channels.md)；
 - takeover 使用 compare-and-swap 并递增 generation；
 - 不根据 process name、last_active 或“最近窗口”自动接管；
 - waiter 是一次尚未返回的 MCP invocation，不能跨 Bridge 重启恢复。

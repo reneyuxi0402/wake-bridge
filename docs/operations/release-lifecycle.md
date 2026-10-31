@@ -1,6 +1,6 @@
 # Release install, upgrade, backup, and rollback
 
-状态：engineering preview current runbook；发布基线与后续源码改动见 [验证口径](../verification.md)。Wake Bridge 发布包只支持 Host Adapter Contract；
+状态：`0.9.0-preview.21` 未发布候选 runbook，npm 基线仍为 preview.20；本地验收与发布门禁分开记录，见 [验证口径](../verification.md)。Wake Bridge 发布包只支持 Host Adapter Contract；
 完成本页不等于任何具体 agent 产品获得兼容性或时延保证。
 
 ## 支持矩阵
@@ -14,7 +14,7 @@
 | Node.js | 20 或更高 |
 | SQLite CLI | 3.35.0 或更高，必须支持 `-json` 输出与 JSON1 函数（`json_each`） |
 | topology | 每个 Agent Space 一个本地 instance / SQLite DB |
-| schema | current 8；显式升级支持 6、7 → 8 |
+| schema | 已发布 preview.20 为 8；未发布 preview.21 候选为 9，显式升级支持 6、7、8 → 9 |
 | host integration | out-of-process Host Adapter Contract v1；捆绑实验性 Claude CLI online adapter，不代表通用产品支持 |
 
 自 `0.9.0-preview.9` 起，npm manifest 允许 macOS 与 Linux，并按平台生成 LaunchAgent 或 systemd user unit。Linux 实机证据来自
@@ -32,7 +32,7 @@ Source Connector、Host Adapter 与 agent runtime 必须同机；跨机器 Remot
 
 ```bash
 npm pack --json
-npm install --global ./wake-bridge-0.9.0-preview.20.tgz
+npm install --global ./wake-bridge-0.9.0-preview.21.tgz
 wakebridge release-preflight
 ```
 
@@ -146,13 +146,14 @@ wakebridge backup \
 # 先停止/bootout daemon，避免 migration 期间仍有业务写入。
 wakebridge upgrade \
   --config /absolute/path/wakebridge.config.json \
-  --backup-output /absolute/path/backups/pre-schema-8 \
+  --backup-output /absolute/path/backups/pre-schema-9 \
   --confirm-offline
 ```
 
-upgrade 顺序固定：`offline assertion → WAL checkpoint → quick_check → verified backup → migrate → schema 8 + quick_check`。migration/验证失败会用刚创建的
-backup 自动尝试恢复原 DB；持续的磁盘或权限故障也可能阻止恢复，须保全 verified backup 并先排除故障。schema 8 再执行为 no-op；
-schema 6、7 是本 preview 的升级基线；更旧或更新的 schema 都拒绝。
+使用新源码的 upgrade 顺序固定：`offline assertion → WAL checkpoint → quick_check → verified backup → migrate → schema 9 + quick_check`。migration/验证失败会用刚创建的
+backup 自动尝试恢复原 DB；持续的磁盘或权限故障也可能阻止恢复，须保全 verified backup 并先排除故障。schema 9 再执行为 no-op；
+schema 6、7、8 是新源码的升级基线；更旧或更新的 schema 都拒绝。schema 9 回填已有 channel，不因默认数量上限裁剪旧数据；
+普通 daemon/CLI/MCP 不自动升级，已发布 preview.20 也不能直接打开 schema 9，回退须使用升级前的 verified backup。
 
 ## 数据 rollback / restore
 
@@ -163,7 +164,7 @@ restore 是 offline、instance-fenced 的破坏性操作：
 # 2. 恢复备份；confirm 值必须与 config 中 instance_id 完全一致。
 wakebridge restore \
   --config /absolute/path/wakebridge.config.json \
-  --backup /absolute/path/backups/pre-schema-8 \
+  --backup /absolute/path/backups/pre-schema-9 \
   --rollback-output /absolute/path/backups/pre-restore-current \
   --confirm-instance-id default \
   --confirm-offline

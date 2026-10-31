@@ -294,6 +294,8 @@ export interface BridgeConfig {
   instance_id: string;
   owner_id: string;
   db_path: string;
+  /** Maximum number of active attention channels; existing channels survive a lower limit. */
+  max_channels?: number;
   timezone?: string;
   admin_token?: string;
   quiet_hours?: QuietHoursConfig | null;
@@ -309,6 +311,22 @@ export interface BridgeConfig {
   batch_window_ms?: number;
   default_policy?: PolicyRule;
   policies?: PolicyRule[];
+}
+
+export interface AttentionChannel {
+  instance_id: string;
+  attention_channel: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+/** Direct, currently active references that protect a channel from accidental deletion. */
+export interface ChannelUsage {
+  binding: { endpoint_id: string; generation: number } | null;
+  activity_watch: boolean;
+  policies: Array<{ id: string; version: number }>;
 }
 
 export interface AttentionClaim {

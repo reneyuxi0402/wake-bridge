@@ -2,17 +2,18 @@ import { PassThrough } from "node:stream";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WakeBridge } from "../src/core.js";
 import { MCP_PROTOCOL_VERSION, WakeBridgeMcpServer, runMcpStdio } from "../src/mcp.js";
 
-function bridge(): WakeBridge {
+function bridge(max_channels = 32): WakeBridge {
   return new WakeBridge({
     instance_id: "mcp-instance",
     owner_id: "mcp-owner",
     db_path: join(mkdtempSync(join(tmpdir(), "wake-bridge-mcp-")), "bridge.sqlite"),
     timezone: "UTC",
     endpoint_lease_ms: 24 * 60 * 60_000,
+    max_channels,
   });
 }
 
@@ -41,6 +42,10 @@ describe("Wake Bridge stdio MCP", () => {
     const listed = await server.handleRequest({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     const names = (listed?.result as any).tools.map((tool: any) => tool.name);
     expect(names).toEqual([
+      "attention_channel_create",
+      "attention_channel_list",
+      "attention_channel_rename",
+      "attention_channel_delete",
       "attention_schedule",
       "attention_ack",
       "attention_consume",
@@ -61,6 +66,16 @@ describe("Wake Bridge stdio MCP", () => {
       "attention_source_disable",
     ]);
     expect(names).not.toContain("attention_wait");
+    const deletion = (listed?.result as any).tools.find((tool: any) => tool.name === "attention_channel_delete");
+    expect(deletion.description).toContain("channel_in_use");
+    expect(deletion.description).toContain("force=true");
+    expect(deletion.description).toContain("irreversible");
+    for (const name of ["attention_ack", "attention_consume", "attention_snooze", "attention_dismiss"]) {
+      const description = (listed?.result as any).tools.find((tool: any) => tool.name === name).description;
+      expect(description).toContain("channel_deleted");
+      expect(description).toContain("stop retrying");
+      expect(description).toContain("terminal state");
+    }
     for (const name of ["attention_watch_status", "attention_watch_configure"]) {
       const description = (listed?.result as any).tools.find((tool: any) => tool.name === name).description;
       expect(description).toContain("enabled does not mean armed");
@@ -156,19 +171,70 @@ describe("Wake Bridge stdio MCP", () => {
     const batch = b.listBatches()[0];
 
     const events = await call(server, 1, "attention_event_list", { source: "fixture" });
-    expect(events.events).toMatchObject([{ source: "fixture", type: "new_reply", resource: { uri: "fixture://reply/1" } }]);
+    expect(events.events).toMatchObject([{ source: "fixture", type: "new_reply", resource: { uri: "fixture://reply/1" }, suppression_reason: null }]);
     const binding = await call(server, 2, "attention_binding_status", { channel: "life" });
     expect(binding.binding).toMatchObject({ attention_channel: "life", generation: 1, live: true, endpoint: { host_kind: "mock", session_ref: "session-1" } });
     expect(JSON.stringify(binding)).not.toContain("lease_token");
     expect(JSON.stringify(binding)).not.toContain("routes");
 
+    const query = vi.spyOn(b.db, "query");
     const health = await call(server, 3, "attention_wake_health", { batch_id: batch.id });
+    expect(query.mock.calls.filter(([sql]) => sql.includes("event_transitions"))).toHaveLength(1);
+    query.mockRestore();
     expect(health.delivery).toMatchObject({ batch_id: batch.id, delivery_state: "accepted_but_unseen", unseen_since: expect.any(String) });
     expect(health.attempts).toMatchObject([{ state: "accepted", endpoint_id: endpoint.id }]);
     expect(health.receipts).toMatchObject([{ stage: "transport_accepted" }]);
     expect(health.claims).toHaveLength(1);
     expect(health.events).toHaveLength(1);
+    expect(health.events[0].suppression_reason).toBeNull();
     b.close();
+  });
+
+  it("projects only fixed channel-ingest suppression reasons in one selected-page query", async () => {
+    const b = bridge(1);
+    const other = new WakeBridge({ ...b.config, instance_id: "other-mcp-instance" });
+    const server = new WakeBridgeMcpServer(b);
+    try {
+      const input = (key: string, channel: string) => ({ type: "channel.test", dedupe_key: key, attention_channel_hint: channel,
+        resource: { uri: `fixture://${key}` }, metadata: { token: "metadata-private-token" }, payload_preview: "payload-private-token" });
+      b.createChannel({ attention_channel: "deleted", name: "Deleted" });
+      b.deleteChannel("deleted");
+      b.updatePolicy({ id: "deleted-route", version: 1, match: { type: "routed.deleted" }, delivery: { mode: "immediate" }, target: { attention_channel: "deleted" } });
+      const deleted = b.emit("fixture", { ...input("deleted", "hint-is-not-actual-channel"), type: "routed.deleted" });
+      b.createChannel({ attention_channel: "active", name: "Active" });
+      const limited = b.emit("fixture", input("limited", "new"));
+      const expired = b.emit("fixture", input("expired", "active"));
+      b.deleteChannel("active");
+      b.updatePolicy({ id: "silent", version: 1, match: { type: "silent" }, delivery: { mode: "suppress" } });
+      const silent = b.emit("fixture", { ...input("silent", "deleted"), type: "silent" });
+      other.createChannel({ attention_channel: "other-deleted", name: "Other deleted" });
+      other.deleteChannel("other-deleted");
+      const otherEvent = other.emit("other-source", input("other", "other-deleted"));
+      const before = b.db.query("SELECT * FROM event_transitions ORDER BY seq;");
+      const query = vi.spyOn(b.db, "query");
+      const listed = await call(server, 1, "attention_event_list", { source: "fixture", limit: 100 });
+      const queries = query.mock.calls.filter(([sql]) => sql.includes("event_transitions"));
+      expect(queries).toHaveLength(1);
+      for (const id of [deleted.event.id, limited.event.id, expired.event.id, silent.event.id]) expect(queries[0][0]).toContain(id);
+      expect(queries[0][0]).not.toContain(otherEvent.event.id);
+      expect(queries[0][0]).not.toMatch(/resource|payload|metadata/u);
+      const reasons = Object.fromEntries(listed.events.map((event: any) => [event.event_id, event.suppression_reason]));
+      expect(reasons).toEqual({ [deleted.event.id]: "channel_deleted", [limited.event.id]: "channel_limit_reached", [expired.event.id]: null, [silent.event.id]: null });
+      expect(listed.events.find((event: any) => event.event_id === deleted.event.id)).toMatchObject({
+        state: "suppressed", attention_channel_hint: "hint-is-not-actual-channel", matched_policy_id: "deleted-route", matched_policy_version: 1,
+      });
+      const encoded = JSON.stringify(listed);
+      expect(encoded).not.toContain("metadata-private-token");
+      expect(encoded).not.toContain("payload-private-token");
+      query.mockClear();
+      const only = await call(server, 2, "attention_event_list", { source: "fixture", limit: 1 });
+      expect(only.events).toHaveLength(1);
+      const selectedQuery = query.mock.calls.filter(([sql]) => sql.includes("event_transitions"));
+      expect(selectedQuery).toHaveLength(1);
+      for (const event of listed.events) if (event.event_id !== only.events[0].event_id) expect(selectedQuery[0][0]).not.toContain(event.event_id);
+      query.mockRestore();
+      expect(b.db.query("SELECT * FROM event_transitions ORDER BY seq;")).toEqual(before);
+    } finally { other.close(); b.close(); }
   });
 
   it("exposes owner self-service source controls without accepting provider credentials", async () => {

@@ -47,6 +47,7 @@ export interface HostAdapter extends WakeTransport {
 
 const IDENTIFIER = /^[a-z][a-z0-9._-]{0,63}$/u;
 const PRINTABLE_REF = /^[^\u0000-\u001f\u007f]{1,256}$/u;
+const PRINTABLE_CHANNEL = /^[^\u0000-\u001f\u007f]{1,200}$/u;
 const MAX_RESPONSE_BYTES = 65_536;
 
 function nonEmptyStrings(values: unknown): values is string[] {
@@ -133,6 +134,11 @@ export interface HostSessionRegistration {
   binding: Binding;
 }
 
+export interface HostSessionChannelsRegistration {
+  endpoint: Endpoint & { lease_token: string };
+  bindings: Binding[];
+}
+
 export interface HostSessionClientOptions {
   base_url: string;
   host_token: string;
@@ -144,6 +150,13 @@ export interface HostSessionClientOptions {
 export interface HostSessionOpenInput {
   session_ref: string;
   attention_channel: string;
+  route_origin: string;
+  route_token: string;
+}
+
+export interface HostSessionOpenChannelsInput {
+  session_ref: string;
+  attention_channels: string[];
   route_origin: string;
   route_token: string;
 }
@@ -202,8 +215,42 @@ export class HostSessionClient {
   }
 
   async open(input: HostSessionOpenInput): Promise<HostSessionRegistration> {
-    if (!PRINTABLE_REF.test(input.session_ref) || !PRINTABLE_REF.test(input.attention_channel)) {
+    if (typeof input.attention_channel !== "string" || !input.attention_channel.trim() || !PRINTABLE_CHANNEL.test(input.attention_channel)) {
       throw new WakeBridgeSdkError("host session_ref or attention_channel is invalid", "invalid_host_session", 400);
+    }
+    const value = await this.post("v1/host-sessions/open", this.hostToken, {
+      ...this.sessionRoute(input),
+      attention_channel: input.attention_channel,
+    }) as HostSessionRegistration;
+    if (!value?.endpoint?.id || !value.endpoint.lease_token || !Number.isSafeInteger(value?.binding?.generation)) {
+      throw new WakeBridgeSdkError("Wake Bridge returned an invalid host session", "invalid_host_session_response", 502);
+    }
+    return value;
+  }
+
+  async openChannels(input: HostSessionOpenChannelsInput): Promise<HostSessionChannelsRegistration> {
+    if (!Array.isArray(input.attention_channels) || !input.attention_channels.length
+      || input.attention_channels.some((channel) => typeof channel !== "string" || !channel.trim() || !PRINTABLE_CHANNEL.test(channel))
+      || new Set(input.attention_channels.map((channel) => channel.trim())).size !== input.attention_channels.length) {
+      throw new WakeBridgeSdkError("host attention_channels must be non-empty, distinct bounded strings", "invalid_host_session", 400);
+    }
+    const value = await this.post("v1/host-sessions/open", this.hostToken, {
+      ...this.sessionRoute(input),
+      attention_channels: input.attention_channels,
+    }) as HostSessionChannelsRegistration;
+    const channels = new Set(input.attention_channels.map((channel) => channel.trim()));
+    if (!value?.endpoint?.id || !value.endpoint.lease_token || !Array.isArray(value.bindings)
+      || value.bindings.length !== channels.size
+      || value.bindings.some((binding) => binding?.endpoint_id !== value.endpoint.id
+        || !Number.isSafeInteger(binding?.generation) || binding.generation < 1 || !channels.delete(binding.attention_channel))) {
+      throw new WakeBridgeSdkError("Wake Bridge returned an invalid host session", "invalid_host_session_response", 502);
+    }
+    return value;
+  }
+
+  private sessionRoute(input: Pick<HostSessionOpenInput, "session_ref" | "route_origin" | "route_token">) {
+    if (typeof input.session_ref !== "string" || !input.session_ref.trim() || !PRINTABLE_REF.test(input.session_ref)) {
+      throw new WakeBridgeSdkError("host session_ref is invalid", "invalid_host_session", 400);
     }
     const routeOrigin = loopbackHttpOrigin(input.route_origin, "host delivery route").origin;
     if (typeof input.route_token !== "string" || input.route_token.length < MIN_SECRET_LENGTH) {
@@ -212,16 +259,11 @@ export class HostSessionClient {
     if (input.route_token === this.hostToken) {
       throw new WakeBridgeSdkError("credential_scope_collision: host bootstrap and delivery route tokens must be distinct", "credential_scope_collision", 400);
     }
-    const value = await this.post("v1/host-sessions/open", this.hostToken, {
+    return {
       adapter_kind: this.adapterKind,
       session_ref: input.session_ref,
-      attention_channel: input.attention_channel,
       route_address: { base_url: `${routeOrigin}/`, token: input.route_token },
-    }) as HostSessionRegistration;
-    if (!value?.endpoint?.id || !value.endpoint.lease_token || !Number.isSafeInteger(value?.binding?.generation)) {
-      throw new WakeBridgeSdkError("Wake Bridge returned an invalid host session", "invalid_host_session_response", 502);
-    }
-    return value;
+    };
   }
 
   lease(registration: HostSessionRegistration): HostSessionLease {
@@ -231,6 +273,10 @@ export class HostSessionClient {
       attention_channel: registration.binding.attention_channel,
       generation: registration.binding.generation,
     };
+  }
+
+  leases(registration: HostSessionChannelsRegistration): HostSessionLease[] {
+    return registration.bindings.map((binding) => this.lease({ endpoint: registration.endpoint, binding }));
   }
 
   async renew(lease: HostSessionLease): Promise<Endpoint> {
@@ -299,8 +345,9 @@ export class HostSessionClient {
       let value: unknown = {};
       try { value = raw ? JSON.parse(raw) : {}; } catch { /* handled below */ }
       if (!response.ok) {
-        const message = value && typeof value === "object" && "code" in value ? String((value as { code: unknown }).code) : `HTTP ${response.status}`;
-        throw new WakeBridgeSdkError(`Wake Bridge host request failed: ${message}`, "host_session_request_failed", response.status);
+        const candidate = value && typeof value === "object" && "code" in value ? (value as { code: unknown }).code : undefined;
+        const remoteCode = typeof candidate === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(candidate) ? candidate : undefined;
+        throw new WakeBridgeSdkError(`Wake Bridge host request failed: ${remoteCode ?? `HTTP ${response.status}`}`, "host_session_request_failed", response.status, remoteCode);
       }
       if (!value || typeof value !== "object" || Array.isArray(value)) {
         throw new WakeBridgeSdkError("Wake Bridge host response is invalid", "invalid_host_session_response", 502);

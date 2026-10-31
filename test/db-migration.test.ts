@@ -18,7 +18,7 @@ describe("SQLite migrations", () => {
     try {
       const before = readFileSync(path);
       const reopened = new SqliteDatabase(path);
-      expect(reopened.query<{ user_version: number }>("PRAGMA user_version;")).toEqual([{ user_version: 8 }]);
+      expect(reopened.query<{ user_version: number }>("PRAGMA user_version;")).toEqual([{ user_version: 9 }]);
       reopened.close();
       expect(readFileSync(path)).toEqual(before);
     } finally {
@@ -89,9 +89,10 @@ PRAGMA user_version=6;
         .toContain("routes_json");
       expect(bridge.db.query<{ name: string }>("PRAGMA table_info(endpoints);").map((row) => row.name))
         .not.toContain("cold_routes_json");
-      expect(bridge.db.query<{ user_version: number }>("PRAGMA user_version;")[0].user_version).toBe(8);
+      expect(bridge.db.query<{ user_version: number }>("PRAGMA user_version;")[0].user_version).toBe(9);
       expect(bridge.db.query<{ version: number }>("SELECT version FROM schema_migrations WHERE version=7;")).toEqual([{ version: 7 }]);
       expect(bridge.db.query<{ version: number }>("SELECT version FROM schema_migrations WHERE version=8;")).toEqual([{ version: 8 }]);
+      expect(bridge.db.query<{ version: number }>("SELECT version FROM schema_migrations WHERE version=9;")).toEqual([{ version: 9 }]);
       const watchColumns = bridge.db.query<{ name: string }>("PRAGMA table_info(activity_watches);").map((row) => row.name);
       expect(watchColumns).toContain("mode");
       expect(watchColumns).not.toContain("rescue_mode");
@@ -109,5 +110,82 @@ PRAGMA user_version=6;
       bridge.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("explicitly upgrades v8 channel references without counting ignored event hints or truncating an over-limit instance", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wake-bridge-channel-migration-"));
+    const path = join(dir, "bridge.sqlite");
+    const config = { instance_id: "i", owner_id: "o", db_path: path, timezone: "UTC", max_channels: 32 };
+    const initial = new WakeBridge(config);
+    initial.updatePolicy({ id: "fixed", version: 1, order: 10, match: { type: "routed" }, delivery: { mode: "immediate" }, target: { attention_channel: "actual-target" } });
+    initial.updatePolicy({ id: "unused", version: 1, enabled: false, delivery: { mode: "suppress" }, target: { attention_channel: "policy-only" } });
+    initial.updatePolicy({ id: "template", version: 1, enabled: false, delivery: { mode: "immediate" }, target: { attention_channel: "prefix-${attention_channel_hint}" } });
+    const routed = initial.emit("fixture", { type: "routed", dedupe_key: "routed", attention_channel_hint: "ignored-hint", resource: { uri: "job://routed" } });
+    initial.scheduleClaim({ resource: { uri: "job://claim" }, attention_channel: "claim-only", eligible_after: initial.nowIso() });
+    initial.tick();
+    const endpoint = initial.registerEndpoint({ id: "ep", host_kind: "mock", session_ref: "s" });
+    initial.takeover("binding-only", endpoint.id);
+    initial.configureActivityWatch({ attention_channel: "watch-only", enabled: false, idle_after_ms: 60_000 });
+    initial.db.exec(`
+      UPDATE batches SET attention_channel='batch-only' WHERE attention_channel='claim-only';
+      INSERT INTO presence_leases VALUES('i','presence-only','ep',1,'2026-10-30T00:00:00.000Z','2026-10-30T00:01:00.000Z','fixture','fixture');
+      INSERT INTO activity_observations VALUES('i','ep',1,'observation','observation-only','activity_started','2026-10-30T00:00:00.000Z','2026-10-30T00:00:00.000Z');
+      INSERT INTO activity_observations VALUES('other','ep-other',1,'observation','other-channel','activity_started','2026-10-30T00:00:00.000Z','2026-10-30T00:00:00.000Z');
+      DROP TABLE attention_channels;
+      DELETE FROM schema_migrations WHERE version=9;
+      PRAGMA user_version=8;
+    `);
+    initial.close();
+    try {
+      const before = readFileSync(path);
+      expect(() => new SqliteDatabase(path)).toThrowError(/requires explicit upgrade to 9/u);
+      expect(readFileSync(path)).toEqual(before);
+      const upgraded = new WakeBridge({ ...config, max_channels: 1 }, { allowSchemaUpgrade: true, recoverDispatchLeases: false });
+      try {
+        expect(upgraded.listChannels().map((channel) => channel.attention_channel).sort()).toEqual([
+          "actual-target", "batch-only", "binding-only", "claim-only", "observation-only", "policy-only", "presence-only", "watch-only",
+        ]);
+        expect(upgraded.getChannel("ignored-hint")).toBeNull();
+        expect(upgraded.getChannel("default")).toBeNull();
+        expect(upgraded.getChannel("prefix-${attention_channel_hint}")).toBeNull();
+        expect(upgraded.getChannel("other-channel")).toBeNull();
+        expect(upgraded.getEvent(routed.event.id)?.attention_channel_hint).toBe("ignored-hint");
+        expect(upgraded.db.query<{ instance_id: string }>("SELECT DISTINCT instance_id FROM attention_channels ORDER BY instance_id;")).toEqual([{ instance_id: "i" }, { instance_id: "other" }]);
+        expect(() => upgraded.createChannel({ name: "new" })).toThrowError(expect.objectContaining({ code: "channel_limit_reached", status: 429 }));
+        expect(upgraded.renameChannel("claim-only", "Retained").name).toBe("Retained");
+        expect(upgraded.emit("fixture", { type: "more", dedupe_key: "over-limit-existing", attention_channel_hint: "claim-only", resource: { uri: "job://more" } }).claim?.attention_channel).toBe("claim-only");
+        expect(upgraded.deleteChannel("watch-only").deleted_at).not.toBeNull();
+        expect(upgraded.listChannels()).toHaveLength(7);
+        expect(upgraded.db.query<{ integrity_check: string }>("PRAGMA integrity_check;")[0].integrity_check).toBe("ok");
+      } finally { upgraded.close(); }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("uses the configured Space ID to migrate fixed policy targets before any runtime instance rows exist", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wake-bridge-policy-only-migration-"));
+    const path = join(dir, "bridge.sqlite");
+    const config = { instance_id: "policy-only-space", owner_id: "o", db_path: path, max_channels: 1 };
+    const initial = new WakeBridge(config);
+    initial.updatePolicy({ id: "fixed", version: 1, delivery: { mode: "immediate" }, target: { attention_channel: "fixed-channel" } });
+    expect(initial.listEvents()).toEqual([]);
+    expect(initial.listEndpoints()).toEqual([]);
+    initial.db.exec("DROP TABLE attention_channels; DELETE FROM schema_migrations WHERE version=9; PRAGMA user_version=8;");
+    initial.close();
+    try {
+      const upgraded = new WakeBridge(config, { allowSchemaUpgrade: true });
+      try {
+        expect(upgraded.listChannels()).toMatchObject([{ instance_id: "policy-only-space", attention_channel: "fixed-channel", name: "fixed-channel", deleted_at: null }]);
+        expect(() => upgraded.createChannel({ name: "Another" })).toThrowError(expect.objectContaining({ code: "channel_limit_reached", status: 429 }));
+        expect(() => upgraded.deleteChannel("fixed-channel")).toThrowError(expect.objectContaining({
+          code: "channel_in_use", status: 409, usage: { binding: null, activity_watch: false, policies: [{ id: "fixed", version: 1 }] },
+        }));
+        upgraded.deleteChannel("fixed-channel", { force: true });
+      } finally { upgraded.close(); }
+      const restarted = new WakeBridge(config);
+      try {
+        expect(restarted.listChannels()).toEqual([]);
+        expect(restarted.getChannel("fixed-channel")?.deleted_at).not.toBeNull();
+      } finally { restarted.close(); }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

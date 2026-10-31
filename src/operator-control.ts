@@ -30,6 +30,20 @@ export interface OperatorStatus {
   health: OperatorHealth;
   attention_required: boolean;
   instance: { instance_id: string; owner_id: string; timezone: string };
+  ingest: {
+    channel_suppressions: {
+      counts: Record<"channel_deleted" | "channel_limit_reached", number>;
+      latest_at: string | null;
+      recent: Array<{
+        event_id: string;
+        source: string;
+        matched_policy_id: string | null;
+        matched_policy_version: number | null;
+        reason: "channel_deleted" | "channel_limit_reached";
+        at: string;
+      }>;
+    };
+  };
   queue: {
     counts: Record<BatchState, number>;
     due: number;
@@ -216,6 +230,29 @@ export function operatorStatus(
   const degraded = counts.waiting_for_endpoint > 0 || counts.retry_wait > 0
     || sourceCounts.backoff > 0 || channels.some((channel) => !channel.live);
   const health: OperatorHealth = attentionRequired ? "needs_attention" : degraded ? "degraded" : "healthy";
+  // Retained ingest history is diagnostic, not a permanent health incident.
+  // Never include the expired edges produced when existing work is deleted.
+  const suppressionFilter = `e.instance_id=${sqlValue(bridge.config.instance_id)}
+    AND s.state='suppressed' AND t.from_state='received' AND t.to_state='suppressed'
+    AND t.reason IN ('channel_deleted','channel_limit_reached')`;
+  const suppressionCounts = bridge.db.query<Row>(`
+    SELECT t.reason, COUNT(*) AS count, MAX(t.at) AS latest_at FROM event_transitions t
+    JOIN events e ON e.id=t.event_id JOIN event_status s ON s.event_id=e.id
+    WHERE ${suppressionFilter} GROUP BY t.reason;
+  `);
+  const suppressionRecent = bridge.db.query<Row>(`
+    SELECT e.id AS event_id, e.source, e.matched_policy_id, e.matched_policy_version, t.reason, t.at
+    FROM event_transitions t JOIN events e ON e.id=t.event_id JOIN event_status s ON s.event_id=e.id
+    WHERE ${suppressionFilter} ORDER BY t.at DESC, t.seq DESC LIMIT 20;
+  `).map((row) => ({
+    event_id: String(row.event_id),
+    source: String(row.source),
+    matched_policy_id: row.matched_policy_id == null ? null : String(row.matched_policy_id),
+    matched_policy_version: row.matched_policy_version == null ? null : Number(row.matched_policy_version),
+    reason: String(row.reason) as "channel_deleted" | "channel_limit_reached",
+    at: String(row.at),
+  }));
+  const latestSuppressionAt = suppressionCounts.map((row) => String(row.latest_at)).sort().at(-1) ?? null;
   return {
     schema_version: 1,
     generated_at: now,
@@ -226,6 +263,16 @@ export function operatorStatus(
       instance_id: bridge.config.instance_id,
       owner_id: bridge.config.owner_id,
       timezone: bridge.config.timezone ?? "UTC",
+    },
+    ingest: {
+      channel_suppressions: {
+        counts: {
+          channel_deleted: Number(suppressionCounts.find((row) => row.reason === "channel_deleted")?.count ?? 0),
+          channel_limit_reached: Number(suppressionCounts.find((row) => row.reason === "channel_limit_reached")?.count ?? 0),
+        },
+        latest_at: latestSuppressionAt,
+        recent: suppressionRecent,
+      },
     },
     queue: {
       counts,

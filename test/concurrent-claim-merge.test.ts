@@ -8,6 +8,7 @@ import { sqlValue } from "../src/db.js";
 import type { BridgeConfig, PolicyRule, WakeEventInput } from "../src/types.js";
 
 const bridges: WakeBridge[] = [];
+const interleaves: Array<() => void> = [];
 const now = "2026-10-21T12:00:00.000Z";
 
 function pair(policies?: PolicyRule[]) {
@@ -35,26 +36,30 @@ function input(key: string, extra: Partial<WakeEventInput> = {}): WakeEventInput
   };
 }
 
-// Both instances use real SQLite. Pause only at the public transaction boundary:
-// the outer emit has read its candidate, then the other instance commits first.
-function beforeTransaction(bridge: WakeBridge, interleave: () => void): void {
-  const transaction = bridge.db.transaction.bind(bridge.db);
-  vi.spyOn(bridge.db, "transaction").mockImplementationOnce((statements) => {
-    interleave();
-    transaction(statements);
+// Both instances use real SQLite. Pause immediately before BEGIN IMMEDIATE:
+// the outer operation has read its candidate, then the other instance commits
+// first. Cover both transaction()'s exec path and transactions returning rows
+// through query(), without intercepting candidate/preflight SELECTs.
+function beforeTransaction(bridge: WakeBridge, interleave: () => void, matches = (_sql: string) => true): void {
+  const run = vi.fn(interleave);
+  interleaves.push(run);
+  const before = (sql: string) => {
+    if (!run.mock.calls.length && /^\s*BEGIN IMMEDIATE;/u.test(sql) && matches(sql)) run();
+  };
+  const exec = bridge.db.exec.bind(bridge.db);
+  const query = bridge.db.query.bind(bridge.db);
+  vi.spyOn(bridge.db, "exec").mockImplementation((sql) => {
+    before(sql);
+    exec(sql);
+  });
+  vi.spyOn(bridge.db, "query").mockImplementation(<T extends Record<string, unknown>>(sql: string): T[] => {
+    before(sql);
+    return query<T>(sql);
   });
 }
 
 function beforeBatchTransaction(bridge: WakeBridge, interleave: () => void): void {
-  const transaction = bridge.db.transaction.bind(bridge.db);
-  let interleaved = false;
-  vi.spyOn(bridge.db, "transaction").mockImplementation((statements) => {
-    if (!interleaved && statements.some((sql) => /INSERT INTO batches|UPDATE batches SET claim_ids_json/u.test(sql))) {
-      interleaved = true;
-      interleave();
-    }
-    transaction(statements);
-  });
+  beforeTransaction(bridge, interleave, (sql) => /INSERT INTO batches|UPDATE batches SET claim_ids_json/u.test(sql));
 }
 
 function groupedPolicy(maxEvents = 20): PolicyRule[] {
@@ -74,6 +79,9 @@ function claimTransitions(bridge: WakeBridge, claimId: string) {
 }
 
 afterEach(() => {
+  for (const run of interleaves.splice(0)) {
+    expect.soft(run, "the competing SQLite operation must run exactly once before the target transaction").toHaveBeenCalledTimes(1);
+  }
   vi.restoreAllMocks();
   for (const bridge of bridges.splice(0)) bridge.close();
 });

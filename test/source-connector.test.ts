@@ -4,8 +4,8 @@ import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { WakeBridge } from "../src/core.js";
+import { describe, expect, it, vi } from "vitest";
+import { BridgeError, WakeBridge } from "../src/core.js";
 import { startDaemon } from "../src/daemon.js";
 import { SourceControlStore } from "../src/source-adapter.js";
 import {
@@ -107,6 +107,25 @@ async function fixtureConnector(token: string): Promise<{
 
 describe("owner-controlled source connector", () => {
   const adminToken = "admin-token-0123456789abcdef0123456789";
+
+  it("retains the exact BridgeError class at the supervisor boundary", async () => {
+    const bridge = new WakeBridge({ instance_id: "source-error-class", owner_id: "owner", db_path: temporary("bridge.sqlite") });
+    const supervisor = new SourceSupervisor(bridge, [{
+      id: "fixture", base_url: "http://127.0.0.1:4391", token_env: "FIXTURE_TOKEN", enabled: false,
+    }], { FIXTURE_TOKEN: "test-token" }, async (input) => Response.json(String(input).endsWith("/v1/manifest") ? {
+      contract_version: 1, id: "fixture", version: "1", subject_ref: "fixture:owner", binding_fingerprint: `sha256:${"1".repeat(64)}`,
+      read_side_effects: "none", credential_custody: "none", upstream_credential_breadth: "none", upstream_credential_scopes: [], connector_capabilities: ["events.read"],
+    } : { events: [{ type: "job", dedupe_key: "one", resource: { uri: "job://one" } }], next_cursor: { page: 1 } }));
+    const emit = vi.spyOn(bridge, "emitEvent").mockImplementation(() => { throw new BridgeError("fixture quota error", "channel_limit_reached", 429); });
+    try {
+      expect(await supervisor.runOnce("fixture")).toMatchObject({ state: "needs_attention", last_error_class: "channel_limit_reached", checkpoint_revision: 0 });
+    } finally {
+      emit.mockRestore();
+      await supervisor.stop();
+      bridge.close();
+    }
+  });
+
   it("preserves legacy file defaults while durable enable/disable takes precedence across reopen", () => {
     const config = { instance_id: "source-defaults", owner_id: "owner", db_path: temporary("bridge.sqlite") };
     const source = { id: "fixture-notifications", base_url: "http://127.0.0.1:4391", token_env: "FIXTURE_TOKEN" };

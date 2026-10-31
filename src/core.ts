@@ -26,10 +26,12 @@ import type {
   ActivityObservationResult,
   ActivityWatch,
   ActivityWatchConfiguration,
+  AttentionChannel,
   AttentionClaim,
   BatchState,
   Binding,
   BridgeConfig,
+  ChannelUsage,
   ClaimOrigin,
   ClaimState,
   DispatchResult,
@@ -111,6 +113,13 @@ export class BridgeError extends WakeBridgeSdkError {
   }
 }
 
+export class ChannelInUseError extends BridgeError {
+  constructor(readonly usage: ChannelUsage) {
+    super("attention channel is in use", "channel_in_use", 409);
+    this.name = "ChannelInUseError";
+  }
+}
+
 type DbRow = Record<string, any>;
 
 const DEFAULT_POLICY: PolicyRule = {
@@ -134,6 +143,21 @@ const DEFAULT_ACK_TIMEOUT_MS = 30 * 60_000;
 // timeout inside that range so computing a cutoff cannot produce an invalid
 // timestamp even though Number.MAX_SAFE_INTEGER is a little larger.
 const MAX_ACK_TIMEOUT_MS = 8_640_000_000_000_000;
+const CHANNEL_WRITE_ALLOWED = "(SELECT status='ok' FROM channel_write_guard)";
+
+function validateChannelId(channel: string): void {
+  if (typeof channel !== "string" || !channel.trim() || channel.length > 200 || /[\u0000-\u001f\u007f]/u.test(channel)) {
+    throw new BridgeError("attention channel must be a printable string of 1 to 200 characters", "invalid_channel", 400);
+  }
+}
+
+function channelName(name: string): string {
+  const clean = typeof name === "string" ? name.trim() : "";
+  if (!clean || clean.length > 200 || /[\u0000-\u001f\u007f]/u.test(clean)) {
+    throw new BridgeError("channel name must be a printable string of 1 to 200 characters", "invalid_channel", 400);
+  }
+  return clean;
+}
 
 function validateAckTimeout(value: unknown): asserts value is number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > MAX_ACK_TIMEOUT_MS) {
@@ -328,6 +352,10 @@ export class WakeBridge {
     }
     const ackTimeoutMs = config.ack_timeout_ms ?? DEFAULT_ACK_TIMEOUT_MS;
     validateAckTimeout(ackTimeoutMs);
+    const maxChannels = config.max_channels === undefined ? 32 : config.max_channels;
+    if (!Number.isSafeInteger(maxChannels) || maxChannels < 1 || maxChannels > 1024) {
+      throw new BridgeError("max_channels must be an integer between 1 and 1024", "invalid_config", 400);
+    }
     if (config.incident_attention_channel != null && (typeof config.incident_attention_channel !== "string"
       || !config.incident_attention_channel || config.incident_attention_channel.length > 200)) {
       throw new BridgeError("incident_attention_channel must be a non-empty string of at most 200 characters", "invalid_config", 400);
@@ -372,6 +400,7 @@ export class WakeBridge {
     this.config = {
       ...config,
       timezone,
+      max_channels: maxChannels,
       presence_ttl_ms: config.presence_ttl_ms ?? 20 * 60_000,
       activity_ttl_ms: config.activity_ttl_ms ?? 2 * 60_000,
       endpoint_lease_ms: config.endpoint_lease_ms ?? 60 * 60_000,
@@ -381,7 +410,7 @@ export class WakeBridge {
       batch_window_ms: config.batch_window_ms ?? 0,
     };
     this.clock = options.clock ?? (() => new Date());
-    this.db = new SqliteDatabase(config.db_path, { allowSchemaUpgrade: options.allowSchemaUpgrade });
+    this.db = new SqliteDatabase(config.db_path, { allowSchemaUpgrade: options.allowSchemaUpgrade, instanceId: config.instance_id });
     this.mockTransport = new MockTransport();
     if (options.autoMockTransport !== false) this.registerTransport(this.mockTransport);
     for (const transport of options.transports ?? []) this.registerTransport(transport);
@@ -401,6 +430,180 @@ export class WakeBridge {
 
   nowIso(): string {
     return isoNow(this.now());
+  }
+
+  private channelGuardSql(channels: string[], register = true, explicit = false): string {
+    const requested = `SELECT value FROM json_each(${sqlJson(channels)})`;
+    const scope = `instance_id=${sqlValue(this.config.instance_id)}`;
+    return `CREATE TEMP TABLE channel_write_guard(status TEXT NOT NULL);
+      INSERT INTO channel_write_guard SELECT CASE
+        ${explicit ? `WHEN EXISTS(SELECT 1 FROM attention_channels WHERE ${scope} AND attention_channel IN (${requested})) THEN 'channel_exists'` : ""}
+        WHEN EXISTS(SELECT 1 FROM attention_channels WHERE ${scope} AND attention_channel IN (${requested}) AND deleted_at IS NOT NULL) THEN 'channel_deleted'
+        ${register
+          ? `WHEN EXISTS(SELECT 1 FROM json_each(${sqlJson(channels)}) j WHERE NOT EXISTS
+                (SELECT 1 FROM attention_channels c WHERE c.instance_id=${sqlValue(this.config.instance_id)} AND c.attention_channel=j.value))
+              AND (SELECT count(*) FROM attention_channels WHERE ${scope} AND deleted_at IS NULL)
+              + (SELECT count(*) FROM json_each(${sqlJson(channels)}) j WHERE NOT EXISTS
+                (SELECT 1 FROM attention_channels c WHERE c.instance_id=${sqlValue(this.config.instance_id)} AND c.attention_channel=j.value))>${this.config.max_channels}
+              THEN 'channel_limit_reached'`
+          : `WHEN EXISTS(SELECT 1 FROM json_each(${sqlJson(channels)}) j WHERE NOT EXISTS
+                (SELECT 1 FROM attention_channels c WHERE c.instance_id=${sqlValue(this.config.instance_id)} AND c.attention_channel=j.value)) THEN 'channel_not_found'`}
+        ELSE 'ok' END;`;
+  }
+
+  private channelRegistrationSql(channels: string[], now: string, condition = CHANNEL_WRITE_ALLOWED, name?: string): string {
+    return `INSERT INTO attention_channels(instance_id, attention_channel, name, created_at, updated_at, deleted_at)
+      SELECT ${sqlValue(this.config.instance_id)}, j.value, ${name == null ? "j.value" : sqlValue(name)}, ${sqlValue(now)}, ${sqlValue(now)}, NULL
+      FROM json_each(${sqlJson(channels)}) j WHERE ${condition} AND NOT EXISTS
+        (SELECT 1 FROM attention_channels c WHERE c.instance_id=${sqlValue(this.config.instance_id)} AND c.attention_channel=j.value);`;
+  }
+
+  private checkChannelStatus(status: string): void {
+    if (status === "ok") return;
+    if (status === "channel_limit_reached") throw new BridgeError("active channel limit reached", status, 429);
+    if (status === "channel_not_found") throw new BridgeError("attention channel is unknown", status, 404);
+    if (status === "channel_exists") throw new BridgeError("attention channel ID already exists", status, 409);
+    if (status === "channel_deleted") throw new BridgeError("attention channel was deleted", status, 409);
+    if (status === "stale_generation") throw new BridgeError("operation targets a stale channel binding", status, 409);
+    if (status === "endpoint_fenced") throw new BridgeError("endpoint lease is no longer current", status, 409);
+  }
+
+  /** The guard is connection-local; only this script can observe it, and every durable write is conditional on it. */
+  private channelTransaction(channels: string[], now: string, statements: string[], register = true, allowSuppressedEvent = false): void {
+    const row = this.db.query<{ status: string }>([
+      "BEGIN IMMEDIATE;", this.channelGuardSql(channels, register),
+      ...(register ? [this.channelRegistrationSql(channels, now)] : []),
+      ...statements, "SELECT status FROM channel_write_guard;", "COMMIT;",
+    ].join("\n"))[0];
+    // Only event ingestion opts into a durable suppressed result. Explicit
+    // registration and host writes still surface all channel guard failures.
+    if (!allowSuppressedEvent || !["channel_deleted", "channel_limit_reached"].includes(row.status)) this.checkChannelStatus(row.status);
+  }
+
+  private assertChannelNotDeleted(channel: string): void {
+    if (this.getChannel(channel)?.deleted_at) this.checkChannelStatus("channel_deleted");
+  }
+
+  private channelBindingFenceSql(channel: string, endpointId: string, generation: number, now: string, token?: string): string {
+    return `UPDATE channel_write_guard SET status=CASE
+      ${token == null ? "" : `WHEN NOT EXISTS(SELECT 1 FROM endpoints WHERE instance_id=${sqlValue(this.config.instance_id)}
+        AND id=${sqlValue(endpointId)} AND lease_token_hash=${sqlValue(sha256(token))} AND lease_expires_at>${sqlValue(now)}) THEN 'endpoint_fenced'`}
+      WHEN NOT EXISTS(SELECT 1 FROM bindings WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)}
+        AND endpoint_id=${sqlValue(endpointId)} AND generation=${sqlValue(generation)}) THEN 'stale_generation'
+      ELSE 'ok' END WHERE status='ok';`;
+  }
+
+  createChannel(input: { name: string; attention_channel?: string }): AttentionChannel {
+    const name = channelName(input?.name);
+    const channel = input.attention_channel ?? id("ch");
+    validateChannelId(channel);
+    if (channel !== channel.trim()) {
+      throw new BridgeError("attention channel ID must not have leading or trailing whitespace", "invalid_channel", 400);
+    }
+    const now = this.nowIso();
+    const row = this.db.query<DbRow>([
+      "BEGIN IMMEDIATE;", this.channelGuardSql([channel], true, true),
+      this.channelRegistrationSql([channel], now, CHANNEL_WRITE_ALLOWED, name),
+      `SELECT g.status, c.* FROM channel_write_guard g LEFT JOIN attention_channels c
+        ON c.instance_id=${sqlValue(this.config.instance_id)} AND c.attention_channel=${sqlValue(channel)};`, "COMMIT;",
+    ].join("\n"))[0];
+    this.checkChannelStatus(row.status);
+    return this.channelFromRow(row);
+  }
+
+  listChannels(includeDeleted = false): AttentionChannel[] {
+    return this.db.query<DbRow>(`SELECT * FROM attention_channels WHERE instance_id=${sqlValue(this.config.instance_id)}
+      ${includeDeleted ? "" : "AND deleted_at IS NULL"} ORDER BY created_at, attention_channel;`).map((row) => this.channelFromRow(row));
+  }
+
+  getChannel(channel: string): AttentionChannel | null {
+    const row = this.db.query<DbRow>(`SELECT * FROM attention_channels WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)};`)[0];
+    return row ? this.channelFromRow(row) : null;
+  }
+
+  private channelFromRow(row: DbRow): AttentionChannel {
+    return { instance_id: String(row.instance_id), attention_channel: String(row.attention_channel), name: String(row.name),
+      created_at: String(row.created_at), updated_at: String(row.updated_at), deleted_at: row.deleted_at == null ? null : String(row.deleted_at) };
+  }
+
+  renameChannel(channel: string, name: string): AttentionChannel {
+    validateChannelId(channel);
+    const clean = channelName(name);
+    this.channelTransaction([channel], this.nowIso(), [
+      `UPDATE attention_channels SET name=${sqlValue(clean)}, updated_at=${sqlValue(this.nowIso())}
+       WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)} AND ${CHANNEL_WRITE_ALLOWED};`,
+    ], false);
+    return this.getChannel(channel)!;
+  }
+
+  deleteChannel(channel: string, options: { force?: boolean } = {}): AttentionChannel {
+    validateChannelId(channel);
+    if (options.force !== undefined && typeof options.force !== "boolean") {
+      throw new BridgeError("force must be boolean", "invalid_arguments", 400);
+    }
+    const now = this.nowIso();
+    const scope = `instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)}`;
+    const batchIds = `SELECT id FROM batches WHERE ${scope}`;
+    const eventIds = `SELECT j.value FROM claims c, json_each(c.event_ids_json) j WHERE c.instance_id=${sqlValue(this.config.instance_id)}
+      AND c.attention_channel=${sqlValue(channel)} AND c.state NOT IN (${FINALIZED_CLAIM_STATES.map(sqlValue).join(",")})`;
+    const active = "(SELECT active FROM channel_delete_guard)";
+    // Normal installs validate policy contents. Under this same writer lock,
+    // select only the latest enabled, supported rules with literal targets.
+    const row = this.db.query<DbRow>([
+      "BEGIN IMMEDIATE;",
+      `CREATE TEMP TABLE channel_delete_guard AS SELECT
+        CASE WHEN EXISTS(SELECT 1 FROM attention_channels WHERE ${scope}) THEN 'ok' ELSE 'channel_not_found' END AS status,
+        EXISTS(SELECT 1 FROM attention_channels WHERE ${scope} AND deleted_at IS NULL) AS active,
+        (SELECT json_object('endpoint_id', endpoint_id, 'generation', generation) FROM bindings WHERE ${scope}) AS binding_json,
+        EXISTS(SELECT 1 FROM activity_watches WHERE ${scope} AND enabled=1) AS activity_watch,
+        (SELECT json_group_array(json_object('id', id, 'version', version)) FROM (
+          SELECT p.id, p.version FROM policies p
+          WHERE p.version=(SELECT max(latest.version) FROM policies latest WHERE latest.id=p.id)
+            AND json_extract(p.rule_json, '$.enabled') IS NOT 0
+            AND json_extract(p.rule_json, '$.target.attention_channel')=${sqlValue(channel)}
+            AND instr(json_extract(p.rule_json, '$.target.attention_channel'), ${sqlValue("${")})=0
+            AND json_extract(p.rule_json, '$.delivery.mode') IN ('immediate','scheduled','suppress')
+            AND NOT EXISTS(SELECT 1 FROM json_each(p.rule_json, '$.delivery')
+              WHERE key IN ('debounce_ms','cadence_ms','max_delay_ms'))
+            AND NOT EXISTS(SELECT 1 FROM json_each(p.rule_json, '$.target')
+              WHERE key IN ('prefer_transport','busy_behavior') AND value IS NOT NULL)
+          ORDER BY p.id
+        )) AS policies_json;`,
+      `UPDATE channel_delete_guard SET status='channel_in_use', active=0
+        WHERE active AND ${options.force === true ? 0 : 1} AND (binding_json IS NOT NULL OR activity_watch OR json_array_length(policies_json)>0);`,
+      `UPDATE attention_channels SET deleted_at=${sqlValue(now)}, updated_at=${sqlValue(now)} WHERE ${scope} AND ${active};`,
+      `DELETE FROM bindings WHERE ${scope} AND ${active};`,
+      `DELETE FROM presence_leases WHERE ${scope} AND ${active};`,
+      `UPDATE activity_watches SET enabled=0, endpoint_id=NULL, binding_generation=NULL, epoch=epoch+1, armed_at=NULL,
+        last_nonwake_activity_at=NULL, activity_lease_expires_at=NULL, fired_epoch=NULL, next_due_at=NULL, updated_at=${sqlValue(now)}
+        WHERE ${scope} AND ${active};`,
+      `UPDATE delivery_correlations SET state='discarded' WHERE batch_id IN (${batchIds}) AND state='outstanding' AND ${active};`,
+      `UPDATE outbox_attempts SET state='failed', finished_at=${sqlValue(now)}, error_class='channel_deleted', error_message=NULL
+        WHERE batch_id IN (${batchIds}) AND state='leased' AND ${active};`,
+      `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at)
+        SELECT event_id, state, 'expired', 'channel_deleted', ${sqlValue(now)} FROM event_status
+        WHERE event_id IN (${eventIds}) AND state IN ('received','matched','batched') AND ${active};`,
+      `UPDATE event_status SET state='expired', updated_at=${sqlValue(now)}
+        WHERE event_id IN (${eventIds}) AND state IN ('received','matched','batched') AND ${active};`,
+      `INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at)
+        SELECT id, state, 'dismissed', 'channel_deleted', ${sqlValue(now)} FROM claims
+        WHERE ${scope} AND state NOT IN (${FINALIZED_CLAIM_STATES.map(sqlValue).join(",")}) AND ${active};`,
+      `UPDATE claims SET state='dismissed', dismissed_reason='channel_deleted', updated_at=${sqlValue(now)}
+        WHERE ${scope} AND state NOT IN (${FINALIZED_CLAIM_STATES.map(sqlValue).join(",")}) AND ${active};`,
+      `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
+        SELECT id, state, 'cancelled', 'channel_deleted', ${sqlValue(now)} FROM batches WHERE ${scope} AND state NOT IN ('seen','cancelled') AND ${active};`,
+      `UPDATE batches SET state='cancelled', lease_expires_at=NULL, last_error='channel_deleted', updated_at=${sqlValue(now)}
+        WHERE ${scope} AND state NOT IN ('seen','cancelled') AND ${active};`,
+      `SELECT g.status, g.binding_json, g.activity_watch, g.policies_json, c.* FROM channel_delete_guard g LEFT JOIN attention_channels c
+        ON c.instance_id=${sqlValue(this.config.instance_id)} AND c.attention_channel=${sqlValue(channel)};`, "COMMIT;",
+    ].join("\n"))[0];
+    if (row.status === "channel_in_use") throw new ChannelInUseError({
+      binding: jsonRecord<ChannelUsage["binding"]>(row.binding_json, null),
+      activity_watch: Boolean(row.activity_watch),
+      policies: jsonRecord<ChannelUsage["policies"]>(row.policies_json, []),
+    });
+    this.checkChannelStatus(row.status);
+    return this.channelFromRow(row);
   }
 
   /** Create one policy-routed, deduplicated operator incident when explicitly configured. */
@@ -555,8 +758,13 @@ export class WakeBridge {
     const policy = this.policyForEvent(source, clean, candidates);
     const nowDate = this.now();
     const now = nowDate.toISOString();
-    const suppressed = policy.delivery.mode === "suppress";
+    let suppressed = policy.delivery.mode === "suppress";
     const channel = suppressed ? null : this.targetChannel(policy, clean);
+    if (channel) {
+      const status = this.db.query<{ status: string }>(`${this.channelGuardSql([channel])}\nSELECT status FROM channel_write_guard;`)[0].status;
+      if (status === "channel_deleted" || status === "channel_limit_reached") suppressed = true;
+      else this.checkChannelStatus(status);
+    }
     const quietActive = Boolean(quietWindowAt(nowDate, this.config.quiet_hours, this.config.timezone ?? "UTC"));
     const quietAction = policy.delivery.quiet_hours_policy ?? "defer";
     const quietUntil = quietActive && quietAction === "defer"
@@ -619,7 +827,7 @@ export class WakeBridge {
   private targetChannel(policy: PolicyRule, input: WakeEventInput): string {
     const configured = policy.target?.attention_channel ?? "${attention_channel_hint}";
     const channel = configured.replaceAll("${attention_channel_hint}", input.attention_channel_hint || "default");
-    if (!channel || channel.length > 200) throw new BridgeError("attention channel is invalid", "invalid_policy", 400);
+    validateChannelId(channel);
     return channel;
   }
 
@@ -674,6 +882,8 @@ export class WakeBridge {
     const eventState: EventState = policy.delivery.mode === "suppress" ? "suppressed" : "matched";
     const claimId = eventState === "matched" ? id("ac") : null;
     const channel = claimId ? this.targetChannel(policy, clean) : null;
+    const eventAllowed = "(SELECT status IN ('ok','channel_deleted','channel_limit_reached') FROM channel_write_guard)";
+    const eventStateSql = channel ? `CASE WHEN ${CHANNEL_WRITE_ALLOWED} THEN 'matched' ELSE 'suppressed' END` : "'suppressed'";
     const claimState: ClaimState = "pending";
     let mergedClaim: { id: string } | null = null;
     if (claimId && channel) {
@@ -711,19 +921,19 @@ export class WakeBridge {
     }
     const statements = [
       `INSERT INTO events(id, instance_id, owner_id, source, type, schema_version, occurred_at, received_at, dedupe_key, coalesce_key, priority_hint, attention_channel_hint, actor_ref, resource_json, metadata_json, payload_preview, matched_policy_id, matched_policy_version)
-       VALUES(${sqlValue(eventId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue(this.config.owner_id)}, ${sqlValue(source)}, ${sqlValue(clean.type)}, ${Number(clean.schema_version ?? 1)}, ${sqlValue(clean.occurred_at)}, ${sqlValue(now)}, ${sqlValue(clean.dedupe_key)}, ${sqlValue(clean.coalesce_key)}, ${sqlValue(clean.priority_hint)}, ${sqlValue(clean.attention_channel_hint)}, ${sqlValue(clean.actor_ref)}, ${sqlJson(clean.resource)}, ${sqlJson(clean.metadata ?? {})}, ${sqlValue(clean.payload_preview)}, ${sqlValue(policy.id)}, ${policy.version});`,
-      `INSERT INTO event_status(event_id, state, updated_at) VALUES(${sqlValue(eventId)}, ${sqlValue("received")}, ${sqlValue(now)});`,
-      `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at) VALUES(${sqlValue(eventId)}, NULL, ${sqlValue("received")}, ${sqlValue("ingest")}, ${sqlValue(now)});`,
-      `UPDATE events SET matched_policy_id=${sqlValue(policy.id)}, matched_policy_version=${policy.version} WHERE id=${sqlValue(eventId)};`,
-      `UPDATE event_status SET state=${sqlValue(eventState)}, updated_at=${sqlValue(now)} WHERE event_id=${sqlValue(eventId)};`,
-      `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at) VALUES(${sqlValue(eventId)}, ${sqlValue("received")}, ${sqlValue(eventState)}, ${sqlValue(policy.delivery.mode)}, ${sqlValue(now)});`,
+       SELECT ${sqlValue(eventId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue(this.config.owner_id)}, ${sqlValue(source)}, ${sqlValue(clean.type)}, ${Number(clean.schema_version ?? 1)}, ${sqlValue(clean.occurred_at)}, ${sqlValue(now)}, ${sqlValue(clean.dedupe_key)}, ${sqlValue(clean.coalesce_key)}, ${sqlValue(clean.priority_hint)}, ${sqlValue(clean.attention_channel_hint)}, ${sqlValue(clean.actor_ref)}, ${sqlJson(clean.resource)}, ${sqlJson(clean.metadata ?? {})}, ${sqlValue(clean.payload_preview)}, ${sqlValue(policy.id)}, ${policy.version} WHERE ${eventAllowed};`,
+      `INSERT INTO event_status(event_id, state, updated_at) SELECT ${sqlValue(eventId)}, 'received', ${sqlValue(now)} WHERE ${eventAllowed};`,
+      `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at) SELECT ${sqlValue(eventId)}, NULL, 'received', 'ingest', ${sqlValue(now)} WHERE ${eventAllowed};`,
+      `UPDATE event_status SET state=${eventStateSql}, updated_at=${sqlValue(now)} WHERE event_id=${sqlValue(eventId)} AND ${eventAllowed};`,
+      `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at) SELECT ${sqlValue(eventId)}, 'received', ${eventStateSql},
+        CASE WHEN NOT ${CHANNEL_WRITE_ALLOWED} THEN (SELECT status FROM channel_write_guard) ELSE ${sqlValue(policy.delivery.mode)} END, ${sqlValue(now)} WHERE ${eventAllowed};`,
     ];
     if (claimId && channel) {
       if (mergedClaim) {
         // Append to the durable array, not the candidate snapshot: another
         // source worker may have merged since the pre-read. Only unfrozen
         // claims can accept new events, even if an active gate state changed.
-        statements.push(`UPDATE claims SET event_ids_json=json_insert(event_ids_json, '$[#]', ${sqlValue(eventId)}), updated_at=${sqlValue(now)} WHERE id=${sqlValue(mergedClaim.id)} AND state IN (${ACTIVE_CLAIM_STATES.map(sqlValue).join(",")});`);
+        statements.push(`UPDATE claims SET event_ids_json=json_insert(event_ids_json, '$[#]', ${sqlValue(eventId)}), updated_at=${sqlValue(now)} WHERE id=${sqlValue(mergedClaim.id)} AND state IN (${ACTIVE_CLAIM_STATES.map(sqlValue).join(",")}) AND ${CHANNEL_WRITE_ALLOWED};`);
         statements.push(`INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT id, state, state, 'merge_attention_duplicate', ${sqlValue(now)} FROM claims WHERE id=${sqlValue(mergedClaim.id)} AND changes()>0;`);
       }
       const eligibleAfter = this.claimEligibleAfter(policy, this.now());
@@ -733,8 +943,8 @@ export class WakeBridge {
       // Create its replacement in the same transaction as ingestion so a
       // matched event is never left without an attention claim.
       const fallback = mergedClaim
-        ? ` WHERE NOT EXISTS (SELECT 1 FROM claims c, json_each(c.event_ids_json) j WHERE c.id=${sqlValue(mergedClaim.id)} AND j.value=${sqlValue(eventId)})`
-        : "";
+        ? ` WHERE ${CHANNEL_WRITE_ALLOWED} AND NOT EXISTS (SELECT 1 FROM claims c, json_each(c.event_ids_json) j WHERE c.id=${sqlValue(mergedClaim.id)} AND j.value=${sqlValue(eventId)})`
+        : ` WHERE ${CHANNEL_WRITE_ALLOWED}`;
       statements.push(
         `INSERT INTO claims(id, instance_id, origin, event_ids_json, resource_json, policy_id, policy_version, attention_channel, eligible_after, expires_at, defer_while_presence, state, reason_code, note, created_at, updated_at, snooze_until, consumed_result_json, dismissed_reason)
          SELECT ${sqlValue(claimId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue("policy")}, ${sqlJson([eventId])}, ${sqlJson(clean.resource)}, ${sqlValue(policy.id)}, ${policy.version}, ${sqlValue(channel)}, ${sqlValue(eligibleAfter)}, ${sqlValue(expiresAt)}, ${deferPresence ? 1 : 0}, ${sqlValue(claimState)}, ${sqlValue(policy.reason_code ?? policy.id)}, NULL, ${sqlValue(now)}, ${sqlValue(now)}, NULL, NULL, NULL${fallback};`,
@@ -742,10 +952,10 @@ export class WakeBridge {
       statements.push(`INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT ${sqlValue(claimId)}, NULL, ${sqlValue(claimState)}, ${sqlValue("policy")}, ${sqlValue(now)} WHERE changes()>0;`);
     }
     if (clean.idempotency_key) {
-      statements.push(`INSERT OR IGNORE INTO idempotency_keys(scope, key, result_json, created_at) VALUES(${sqlValue(`event:${source}`)}, ${sqlValue(clean.idempotency_key)}, ${sqlJson({ event_id: eventId })}, ${sqlValue(now)});`);
+      statements.push(`INSERT OR IGNORE INTO idempotency_keys(scope, key, result_json, created_at) SELECT ${sqlValue(`event:${source}`)}, ${sqlValue(clean.idempotency_key)}, ${sqlJson({ event_id: eventId })}, ${sqlValue(now)} WHERE ${eventAllowed};`);
     }
     try {
-      this.db.transaction(statements);
+      this.channelTransaction(channel ? [channel] : [], now, statements, true, true);
     } catch (error) {
       // Two source workers may pass the pre-read concurrently.  The unique
       // event key is the arbiter; return its durable result instead of
@@ -758,7 +968,7 @@ export class WakeBridge {
     }
     const event = this.getEvent(eventId)!;
     const claim = mergedClaim ? this.findClaimByEventId(eventId) : (claimId ? this.getClaim(claimId) ?? undefined : undefined);
-    return { event, claim, duplicate: false, suppressed: eventState === "suppressed" };
+    return { event, claim, duplicate: false, suppressed: event.state === "suppressed" };
   }
 
   emit(source: string, input: WakeEventInput): EmitResult {
@@ -767,6 +977,9 @@ export class WakeBridge {
 
   scheduleClaim(input: ScheduleClaimInput): ScheduleClaimResult {
     validateResource(input.resource);
+    const channel = input.attention_channel || "default";
+    validateChannelId(channel);
+    this.assertChannelNotDeleted(channel);
     const eligibleAfter = isoOrThrow(input.eligible_after, "eligible_after");
     const expiresAt = input.expires_at == null ? null : isoOrThrow(input.expires_at, "expires_at");
     const key = input.idempotency_key || `resource:${sha256(stableJson({ resource: input.resource, eligibleAfter, channel: input.attention_channel || "default", reason: input.reason_code || "reconsider" }))}`;
@@ -783,26 +996,25 @@ export class WakeBridge {
         }
         throw new BridgeError("self commitment event has no claim", "storage_corrupt", 500);
       }
+      this.assertChannelNotDeleted(claim.attention_channel);
       return { event, claim, duplicate: true, warnings: this.scheduleWarnings(claim.attention_channel) };
     }
     const now = this.nowIso();
     const eventId = `evt_${sha256(`schedule:${this.config.instance_id}:${key}`).slice(0, 32)}`;
     const claimId = `ac_${sha256(`schedule-claim:${this.config.instance_id}:${key}`).slice(0, 32)}`;
-    const channel = input.attention_channel || "default";
-    if (channel.length > 200) throw new BridgeError("attention channel is invalid", "invalid_claim", 400);
     const metadata = { origin: "self_commitment", reason_code: input.reason_code || "reconsider" };
     const statements = [
       `INSERT INTO events(id, instance_id, owner_id, source, type, schema_version, occurred_at, received_at, dedupe_key, coalesce_key, priority_hint, attention_channel_hint, actor_ref, resource_json, metadata_json, payload_preview, matched_policy_id, matched_policy_version)
-       VALUES(${sqlValue(eventId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue(this.config.owner_id)}, ${sqlValue(source)}, ${sqlValue("attention.schedule")}, 1, ${sqlValue(now)}, ${sqlValue(now)}, ${sqlValue(dedupeKey)}, ${sqlValue(channel)}, ${sqlValue("normal")}, ${sqlValue(channel)}, ${sqlValue(this.config.owner_id)}, ${sqlJson(input.resource)}, ${sqlJson(metadata)}, NULL, ${sqlValue("self_commitment")}, 1);`,
-      `INSERT INTO event_status(event_id, state, updated_at) VALUES(${sqlValue(eventId)}, ${sqlValue("matched")}, ${sqlValue(now)});`,
-      `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at) VALUES(${sqlValue(eventId)}, NULL, ${sqlValue("matched")}, ${sqlValue("self_commitment")}, ${sqlValue(now)});`,
+       SELECT ${sqlValue(eventId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue(this.config.owner_id)}, ${sqlValue(source)}, ${sqlValue("attention.schedule")}, 1, ${sqlValue(now)}, ${sqlValue(now)}, ${sqlValue(dedupeKey)}, ${sqlValue(channel)}, ${sqlValue("normal")}, ${sqlValue(channel)}, ${sqlValue(this.config.owner_id)}, ${sqlJson(input.resource)}, ${sqlJson(metadata)}, NULL, ${sqlValue("self_commitment")}, 1 WHERE ${CHANNEL_WRITE_ALLOWED};`,
+      `INSERT INTO event_status(event_id, state, updated_at) SELECT ${sqlValue(eventId)}, 'matched', ${sqlValue(now)} WHERE ${CHANNEL_WRITE_ALLOWED};`,
+      `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at) SELECT ${sqlValue(eventId)}, NULL, 'matched', 'self_commitment', ${sqlValue(now)} WHERE ${CHANNEL_WRITE_ALLOWED};`,
       `INSERT INTO claims(id, instance_id, origin, event_ids_json, resource_json, policy_id, policy_version, attention_channel, eligible_after, expires_at, defer_while_presence, state, reason_code, note, created_at, updated_at, snooze_until, consumed_result_json, dismissed_reason)
-       VALUES(${sqlValue(claimId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue("self_commitment")}, ${sqlJson([eventId])}, ${sqlJson(input.resource)}, ${sqlValue("self_commitment")}, 1, ${sqlValue(channel)}, ${sqlValue(eligibleAfter)}, ${sqlValue(expiresAt)}, ${sqlValue(input.defer_while_presence !== false)}, ${sqlValue("pending")}, ${sqlValue(input.reason_code || "reconsider")}, ${sqlValue(input.note)}, ${sqlValue(now)}, ${sqlValue(now)}, NULL, NULL, NULL);`,
-      `INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) VALUES(${sqlValue(claimId)}, NULL, ${sqlValue("pending")}, ${sqlValue("self_commitment")}, ${sqlValue(now)});`,
-      `INSERT OR IGNORE INTO idempotency_keys(scope, key, result_json, created_at) VALUES(${sqlValue("claim.schedule")}, ${sqlValue(key)}, ${sqlJson({ event_id: eventId, claim_id: claimId })}, ${sqlValue(now)});`,
+       SELECT ${sqlValue(claimId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue("self_commitment")}, ${sqlJson([eventId])}, ${sqlJson(input.resource)}, ${sqlValue("self_commitment")}, 1, ${sqlValue(channel)}, ${sqlValue(eligibleAfter)}, ${sqlValue(expiresAt)}, ${sqlValue(input.defer_while_presence !== false)}, 'pending', ${sqlValue(input.reason_code || "reconsider")}, ${sqlValue(input.note)}, ${sqlValue(now)}, ${sqlValue(now)}, NULL, NULL, NULL WHERE ${CHANNEL_WRITE_ALLOWED};`,
+      `INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT ${sqlValue(claimId)}, NULL, 'pending', 'self_commitment', ${sqlValue(now)} WHERE ${CHANNEL_WRITE_ALLOWED};`,
+      `INSERT OR IGNORE INTO idempotency_keys(scope, key, result_json, created_at) SELECT ${sqlValue("claim.schedule")}, ${sqlValue(key)}, ${sqlJson({ event_id: eventId, claim_id: claimId })}, ${sqlValue(now)} WHERE ${CHANNEL_WRITE_ALLOWED};`,
     ];
     try {
-      this.db.transaction(statements);
+      this.channelTransaction([channel], now, statements);
     } catch (error) {
       if (this.isUniqueConflict(error)) {
         const duplicateEvent = this.db.query<DbRow>(`SELECT id FROM events WHERE instance_id=${sqlValue(this.config.instance_id)} AND source=${sqlValue(source)} AND dedupe_key=${sqlValue(dedupeKey)} LIMIT 1;`)[0];
@@ -983,6 +1195,13 @@ export class WakeBridge {
   }
 
   registerEndpoint(registration: EndpointRegistration): Endpoint {
+    const write = this.endpointRegistrationWrite(registration);
+    this.db.transaction([write.statement]);
+    const row = this.db.query<DbRow>(`SELECT * FROM endpoints WHERE id=${sqlValue(write.endpointId)};`)[0];
+    return this.endpointFromRow(row, true, write.token);
+  }
+
+  private endpointRegistrationWrite(registration: EndpointRegistration, condition = "1") {
     if (!registration?.host_kind || !registration.session_ref) throw new BridgeError("host_kind and session_ref are required", "invalid_endpoint", 400);
     const now = this.nowIso();
     const endpointId = registration.id || id("ep");
@@ -996,13 +1215,54 @@ export class WakeBridge {
     const routes = registration.routes ?? (registration.host_kind === "mock"
       ? [{ kind: "mock", priority: 100, address: {} }]
       : []);
-    this.db.transaction([
-      `INSERT INTO endpoints(id, instance_id, host_kind, session_ref, lease_token_hash, lease_expires_at, capabilities_json, routes_json, registered_at, updated_at)
-       VALUES(${sqlValue(endpointId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue(registration.host_kind)}, ${sqlValue(registration.session_ref)}, ${sqlValue(sha256(token))}, ${sqlValue(addMs(now, leaseMs))}, ${sqlJson(capabilities)}, ${sqlJson(routes)}, ${sqlValue(now)}, ${sqlValue(now)})
+    return {
+      endpointId, token, now,
+      statement: `INSERT INTO endpoints(id, instance_id, host_kind, session_ref, lease_token_hash, lease_expires_at, capabilities_json, routes_json, registered_at, updated_at)
+       SELECT ${sqlValue(endpointId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue(registration.host_kind)}, ${sqlValue(registration.session_ref)}, ${sqlValue(sha256(token))}, ${sqlValue(addMs(now, leaseMs))}, ${sqlJson(capabilities)}, ${sqlJson(routes)}, ${sqlValue(now)}, ${sqlValue(now)} WHERE ${condition}
        ON CONFLICT(id) DO UPDATE SET host_kind=excluded.host_kind, session_ref=excluded.session_ref, lease_token_hash=excluded.lease_token_hash, lease_expires_at=excluded.lease_expires_at, capabilities_json=excluded.capabilities_json, routes_json=excluded.routes_json, updated_at=excluded.updated_at;`,
-    ]);
-    const row = this.db.query<DbRow>(`SELECT * FROM endpoints WHERE id=${sqlValue(endpointId)};`)[0];
-    return this.endpointFromRow(row, true, token);
+    };
+  }
+
+  /** Rotate one real session's endpoint lease and all requested bindings atomically. */
+  registerHostSession(registration: EndpointRegistration, attentionChannels: string[]): { endpoint: Endpoint; bindings: Binding[] } {
+    if (!Array.isArray(attentionChannels) || !attentionChannels.length
+      || attentionChannels.some((channel) => typeof channel !== "string" || !channel.trim() || channel.length > 200 || /[\u0000-\u001f\u007f]/u.test(channel))
+      || new Set(attentionChannels).size !== attentionChannels.length) {
+      throw new BridgeError("host attention_channels must be non-empty, distinct bounded strings", "invalid_host_session", 400);
+    }
+    const guard = "(SELECT status='ok' FROM host_session_guard)";
+    const write = this.endpointRegistrationWrite(registration, guard);
+    const bindings = this.listBindings();
+    const expected = attentionChannels.map((channel) => bindings.find((binding) => binding.attention_channel === channel)?.generation ?? 0);
+    const channelsSql = attentionChannels.map(sqlValue).join(", ");
+    const cas = attentionChannels.map((channel, index) => `COALESCE((SELECT generation FROM bindings WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)}), 0)=${expected[index]}`).join(" AND ");
+    // The status guard is evaluated under the same writer lock as every write.
+    // Returning it avoids depending on SQLite diagnostic text for API errors.
+    const row = this.db.query<DbRow>([
+      "BEGIN IMMEDIATE;",
+      this.channelGuardSql(attentionChannels),
+      "CREATE TEMP TABLE host_session_guard(status TEXT NOT NULL);",
+      `INSERT INTO host_session_guard SELECT CASE
+        WHEN NOT ${CHANNEL_WRITE_ALLOWED} THEN (SELECT status FROM channel_write_guard)
+        WHEN EXISTS(SELECT 1 FROM bindings WHERE instance_id=${sqlValue(this.config.instance_id)} AND endpoint_id=${sqlValue(write.endpointId)} AND attention_channel NOT IN (${channelsSql})) THEN 'host_session_channels_required'
+        WHEN NOT (${cas}) THEN 'stale_generation' ELSE 'ok' END;`,
+      this.channelRegistrationSql(attentionChannels, write.now, guard),
+      write.statement,
+      ...attentionChannels.flatMap((channel, index) => this.bindingTakeoverStatements(channel, write.endpointId, expected[index] + 1, write.now, guard)),
+      `SELECT g.status, e.*, (SELECT json_group_array(json_object('instance_id', instance_id, 'attention_channel', attention_channel, 'endpoint_id', endpoint_id, 'generation', generation, 'bound_at', bound_at)) FROM bindings WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel IN (${channelsSql})) AS bindings_json
+        FROM host_session_guard g LEFT JOIN endpoints e ON e.id=${sqlValue(write.endpointId)} AND e.instance_id=${sqlValue(this.config.instance_id)};`,
+      "COMMIT;",
+    ].join("\n"))[0];
+    this.checkChannelStatus(row.status);
+    if (row.status === "host_session_channels_required") {
+      throw new BridgeError("all channels bound to this host session must be included", "host_session_channels_required", 409);
+    }
+    if (row.status !== "ok") throw new BridgeError("host session binding generation changed during registration", "stale_generation", 409);
+    const committed = jsonRecord<Binding[]>(row.bindings_json, []);
+    return {
+      endpoint: this.endpointFromRow(row, true, write.token),
+      bindings: attentionChannels.map((channel) => committed.find((binding) => binding.attention_channel === channel)!),
+    };
   }
 
   renewEndpoint(endpointId: string, leaseToken: string, leaseMs?: number): Endpoint {
@@ -1013,16 +1273,17 @@ export class WakeBridge {
     return this.endpointFromRow(result);
   }
 
-  renewBoundEndpoint(endpointId: string, channel: string, expectedGeneration: number, leaseMs?: number): Endpoint {
-    const binding = this.getBinding(channel);
-    if (!binding || binding.endpoint_id !== endpointId || binding.generation !== expectedGeneration) {
-      throw new BridgeError("endpoint renewal does not match current binding generation", "stale_generation", 409);
-    }
-    if (!this.getEndpoint(endpointId)) throw new BridgeError("endpoint is unknown", "endpoint_not_found", 404);
+  renewBoundEndpoint(endpointId: string, channel: string, expectedGeneration: number, leaseMs?: number, allowedChannels?: string[]): Endpoint {
     const now = this.nowIso();
     const duration = assertFiniteMs(leaseMs, "lease_ms", this.config.endpoint_lease_ms!);
-    const result = this.db.query<DbRow>(`UPDATE endpoints SET lease_expires_at=${sqlValue(addMs(now, duration))}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(endpointId)} AND instance_id=${sqlValue(this.config.instance_id)} RETURNING *;`)[0];
-    return this.endpointFromRow(result);
+    const row = this.db.query<DbRow>([
+      "BEGIN IMMEDIATE;",
+      this.boundEndpointGuardSql(endpointId, channel, expectedGeneration, allowedChannels),
+      `UPDATE endpoints SET lease_expires_at=${sqlValue(addMs(now, duration))}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(endpointId)} AND instance_id=${sqlValue(this.config.instance_id)} AND (SELECT status='ok' FROM bound_endpoint_guard);`,
+      `SELECT g.status, e.* FROM bound_endpoint_guard g LEFT JOIN endpoints e ON e.id=${sqlValue(endpointId)} AND e.instance_id=${sqlValue(this.config.instance_id)};`,
+      "COMMIT;",
+    ].join("\n"))[0];
+    return this.boundEndpointResult(row);
   }
 
   revokeEndpoint(endpointId: string, leaseToken: string): Endpoint {
@@ -1030,28 +1291,49 @@ export class WakeBridge {
     return this.revokeEndpointState(endpointId);
   }
 
-  revokeBoundEndpoint(endpointId: string, channel: string, expectedGeneration: number): Endpoint {
-    const binding = this.getBinding(channel);
-    if (!binding || binding.endpoint_id !== endpointId || binding.generation !== expectedGeneration) {
-      throw new BridgeError("endpoint revoke does not match current binding generation", "stale_generation", 409);
-    }
-    if (!this.getEndpoint(endpointId)) throw new BridgeError("endpoint is unknown", "endpoint_not_found", 404);
-    return this.revokeEndpointState(endpointId);
+  revokeBoundEndpoint(endpointId: string, channel: string, expectedGeneration: number, allowedChannels?: string[]): Endpoint {
+    return this.revokeEndpointState(endpointId, this.boundEndpointGuardSql(endpointId, channel, expectedGeneration, allowedChannels));
   }
 
-  private revokeEndpointState(endpointId: string): Endpoint {
+  private boundEndpointGuardSql(endpointId: string, channel: string, expectedGeneration: number, allowedChannels?: string[]): string {
+    return `CREATE TEMP TABLE bound_endpoint_guard(status TEXT NOT NULL);
+      INSERT INTO bound_endpoint_guard SELECT CASE
+        WHEN EXISTS(SELECT 1 FROM attention_channels WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)} AND deleted_at IS NOT NULL) THEN 'channel_deleted'
+        WHEN NOT EXISTS(SELECT 1 FROM bindings WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)} AND endpoint_id=${sqlValue(endpointId)} AND generation=${sqlValue(expectedGeneration)}) THEN 'stale_generation'
+        WHEN NOT EXISTS(SELECT 1 FROM endpoints WHERE instance_id=${sqlValue(this.config.instance_id)} AND id=${sqlValue(endpointId)}) THEN 'endpoint_not_found'
+        ${allowedChannels ? `WHEN EXISTS(SELECT 1 FROM bindings WHERE instance_id=${sqlValue(this.config.instance_id)} AND endpoint_id=${sqlValue(endpointId)} AND attention_channel NOT IN (${allowedChannels.map(sqlValue).join(", ")})) THEN 'invalid_host_session'` : ""}
+        ELSE 'ok' END;`;
+  }
+
+  private boundEndpointResult(row: DbRow): Endpoint {
+    this.checkChannelStatus(row.status);
+    if (row.status === "stale_generation") throw new BridgeError("endpoint operation does not match current binding generation", "stale_generation", 409);
+    if (row.status === "endpoint_not_found") throw new BridgeError("endpoint is unknown", "endpoint_not_found", 404);
+    if (row.status === "invalid_host_session") throw new BridgeError("host credential must cover all channels bound to this endpoint", "invalid_host_session", 400);
+    return this.endpointFromRow(row);
+  }
+
+  private revokeEndpointState(endpointId: string, guardSql?: string): Endpoint {
     const now = this.nowIso();
-    this.db.transaction([
-      `UPDATE endpoints SET lease_expires_at=${sqlValue(now)}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(endpointId)} AND instance_id=${sqlValue(this.config.instance_id)};`,
-      `DELETE FROM presence_leases WHERE instance_id=${sqlValue(this.config.instance_id)} AND endpoint_id=${sqlValue(endpointId)};`,
-      `UPDATE activity_watches SET activity_lease_expires_at=NULL, updated_at=${sqlValue(now)} WHERE instance_id=${sqlValue(this.config.instance_id)} AND endpoint_id=${sqlValue(endpointId)};`,
-      `UPDATE delivery_correlations SET state='discarded' WHERE endpoint_id=${sqlValue(endpointId)} AND state='outstanding';`,
-    ]);
-    return this.getEndpoint(endpointId)!;
+    const condition = guardSql ? "(SELECT status='ok' FROM bound_endpoint_guard)" : "1";
+    const row = this.db.query<DbRow>([
+      "BEGIN IMMEDIATE;",
+      guardSql ?? "",
+      `UPDATE endpoints SET lease_expires_at=${sqlValue(now)}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(endpointId)} AND instance_id=${sqlValue(this.config.instance_id)} AND ${condition};`,
+      `DELETE FROM presence_leases WHERE instance_id=${sqlValue(this.config.instance_id)} AND endpoint_id=${sqlValue(endpointId)} AND ${condition};`,
+      `UPDATE activity_watches SET activity_lease_expires_at=NULL, updated_at=${sqlValue(now)} WHERE instance_id=${sqlValue(this.config.instance_id)} AND endpoint_id=${sqlValue(endpointId)} AND ${condition};`,
+      `UPDATE delivery_correlations SET state='discarded' WHERE endpoint_id=${sqlValue(endpointId)} AND state='outstanding' AND ${condition};`,
+      guardSql
+        ? `SELECT g.status, e.* FROM bound_endpoint_guard g LEFT JOIN endpoints e ON e.id=${sqlValue(endpointId)} AND e.instance_id=${sqlValue(this.config.instance_id)};`
+        : `SELECT 'ok' AS status, e.* FROM endpoints e WHERE e.id=${sqlValue(endpointId)} AND e.instance_id=${sqlValue(this.config.instance_id)};`,
+      "COMMIT;",
+    ].join("\n"))[0];
+    return this.boundEndpointResult(row);
   }
 
   takeover(channel: string, endpointId: string, expectedGeneration?: number): Binding {
-    if (!channel || channel.length > 200) throw new BridgeError("attention channel is invalid", "invalid_binding", 400);
+    validateChannelId(channel);
+    this.assertChannelNotDeleted(channel);
     const endpoint = this.getEndpoint(endpointId);
     if (!endpoint) throw new BridgeError("endpoint is unknown", "endpoint_not_found", 404);
     if (new Date(endpoint.lease_expires_at).getTime() <= this.now().getTime()) throw new BridgeError("endpoint lease has expired", "endpoint_fenced", 409);
@@ -1062,16 +1344,36 @@ export class WakeBridge {
     }
     const generation = currentGeneration + 1;
     const now = this.nowIso();
-    this.db.transaction([
-      `INSERT INTO bindings(instance_id, attention_channel, endpoint_id, generation, bound_at)
-       VALUES(${sqlValue(this.config.instance_id)}, ${sqlValue(channel)}, ${sqlValue(endpointId)}, ${generation}, ${sqlValue(now)})
-       ON CONFLICT(instance_id, attention_channel) DO UPDATE SET endpoint_id=excluded.endpoint_id, generation=excluded.generation, bound_at=excluded.bound_at;`,
-      `DELETE FROM presence_leases WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)};`,
-      `UPDATE activity_watches SET endpoint_id=NULL, binding_generation=NULL, epoch=epoch+1, armed_at=NULL, last_nonwake_activity_at=NULL, activity_lease_expires_at=NULL, fired_epoch=NULL, sequence=0, last_triggered_at=NULL, next_due_at=NULL, updated_at=${sqlValue(now)} WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)};`,
-      `UPDATE delivery_correlations SET state='discarded' WHERE state='outstanding' AND batch_id IN (SELECT id FROM batches WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)});`,
-      `UPDATE batches SET state='pending', binding_generation=NULL, updated_at=${sqlValue(now)}, last_error=NULL WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)} AND state='waiting_for_endpoint';`,
-    ]);
+    const guard = "(SELECT status='ok' FROM takeover_guard)";
+    const row = this.db.query<{ status: string }>([
+      "BEGIN IMMEDIATE;", this.channelGuardSql([channel]),
+      `CREATE TEMP TABLE takeover_guard AS SELECT CASE
+        WHEN NOT ${CHANNEL_WRITE_ALLOWED} THEN (SELECT status FROM channel_write_guard)
+        WHEN NOT EXISTS(SELECT 1 FROM endpoints WHERE id=${sqlValue(endpointId)} AND instance_id=${sqlValue(this.config.instance_id)}) THEN 'endpoint_not_found'
+        WHEN NOT EXISTS(SELECT 1 FROM endpoints WHERE id=${sqlValue(endpointId)} AND instance_id=${sqlValue(this.config.instance_id)} AND lease_expires_at>${sqlValue(now)}) THEN 'endpoint_fenced'
+        WHEN COALESCE((SELECT generation FROM bindings WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)}), 0)<>${currentGeneration} THEN 'stale_generation'
+        ELSE 'ok' END AS status;`,
+      this.channelRegistrationSql([channel], now, guard),
+      ...this.bindingTakeoverStatements(channel, endpointId, generation, now, guard),
+      "SELECT status FROM takeover_guard;", "COMMIT;",
+    ].join("\n"))[0];
+    this.checkChannelStatus(row.status);
+    if (row.status === "endpoint_not_found") throw new BridgeError("endpoint is unknown", row.status, 404);
+    if (row.status === "endpoint_fenced") throw new BridgeError("endpoint lease has expired", row.status, 409);
+    if (row.status === "stale_generation") throw new BridgeError("binding generation changed during takeover", row.status, 409);
     return this.getBinding(channel)!;
+  }
+
+  private bindingTakeoverStatements(channel: string, endpointId: string, generation: number, now: string, condition = "1"): string[] {
+    return [
+      `INSERT INTO bindings(instance_id, attention_channel, endpoint_id, generation, bound_at)
+       SELECT ${sqlValue(this.config.instance_id)}, ${sqlValue(channel)}, ${sqlValue(endpointId)}, ${generation}, ${sqlValue(now)} WHERE ${condition}
+       ON CONFLICT(instance_id, attention_channel) DO UPDATE SET endpoint_id=excluded.endpoint_id, generation=excluded.generation, bound_at=excluded.bound_at;`,
+      `DELETE FROM presence_leases WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)} AND ${condition};`,
+      `UPDATE activity_watches SET endpoint_id=NULL, binding_generation=NULL, epoch=epoch+1, armed_at=NULL, last_nonwake_activity_at=NULL, activity_lease_expires_at=NULL, fired_epoch=NULL, sequence=0, last_triggered_at=NULL, next_due_at=NULL, updated_at=${sqlValue(now)} WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)} AND ${condition};`,
+      `UPDATE delivery_correlations SET state='discarded' WHERE state='outstanding' AND batch_id IN (SELECT id FROM batches WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)}) AND ${condition};`,
+      `UPDATE batches SET state='pending', binding_generation=NULL, updated_at=${sqlValue(now)}, last_error=NULL WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)} AND state='waiting_for_endpoint' AND ${condition};`,
+    ];
   }
 
   private endpointAuthorized(endpointId: string, token: string): DbRow {
@@ -1083,6 +1385,7 @@ export class WakeBridge {
 
   renewPresence(input: PresenceRenewal): PresenceLease {
     if (!input?.attention_channel || !input.endpoint_id || !input.observed_by) throw new BridgeError("presence channel, endpoint and observed_by are required", "invalid_presence", 400);
+    this.assertChannelNotDeleted(input.attention_channel);
     const endpoint = this.endpointAuthorized(input.endpoint_id, input.lease_token || "");
     const capabilities = jsonRecord<EndpointCapabilities>(endpoint.capabilities_json, { cold_push: false });
     if (!capabilities.foreground_presence_observable) {
@@ -1095,17 +1398,19 @@ export class WakeBridge {
     const now = this.nowIso();
     const ttl = Math.min(assertFiniteMs(input.ttl_ms, "ttl_ms", this.config.presence_ttl_ms!), 24 * 60 * 60_000);
     const expires = addMs(now, ttl);
-    this.db.transaction([
+    this.channelTransaction([input.attention_channel], now, [
+      this.channelBindingFenceSql(input.attention_channel, input.endpoint_id, input.generation, now, input.lease_token || ""),
       `INSERT INTO presence_leases(instance_id, attention_channel, endpoint_id, binding_generation, renewed_at, expires_at, observed_by, observation)
-       VALUES(${sqlValue(this.config.instance_id)}, ${sqlValue(input.attention_channel)}, ${sqlValue(input.endpoint_id)}, ${input.generation}, ${sqlValue(now)}, ${sqlValue(expires)}, ${sqlValue(input.observed_by)}, ${sqlValue(input.observation || "user_message_accepted")})
+       SELECT ${sqlValue(this.config.instance_id)}, ${sqlValue(input.attention_channel)}, ${sqlValue(input.endpoint_id)}, ${input.generation}, ${sqlValue(now)}, ${sqlValue(expires)}, ${sqlValue(input.observed_by)}, ${sqlValue(input.observation || "user_message_accepted")} WHERE ${CHANNEL_WRITE_ALLOWED}
        ON CONFLICT(instance_id, attention_channel) DO UPDATE SET endpoint_id=excluded.endpoint_id, binding_generation=excluded.binding_generation, renewed_at=excluded.renewed_at, expires_at=excluded.expires_at, observed_by=excluded.observed_by, observation=excluded.observation;`,
-    ]);
+    ], false);
     return this.getPresence(input.attention_channel)!;
   }
 
   configureActivityWatch(input: ActivityWatchConfiguration): ActivityWatch {
-    const channel = input?.attention_channel?.trim();
-    if (!channel || channel.length > 200) throw new BridgeError("attention channel is invalid", "invalid_activity_watch", 400);
+    const channel = input?.attention_channel;
+    validateChannelId(channel);
+    this.assertChannelNotDeleted(channel);
     const idleAfter = Number(input.idle_after_ms);
     if (!Number.isSafeInteger(idleAfter) || idleAfter < 60_000 || idleAfter > 7 * 24 * 60 * 60_000) {
       throw new BridgeError("idle_after_ms must be an integer between 60000 and 604800000", "invalid_activity_watch", 400);
@@ -1120,24 +1425,27 @@ export class WakeBridge {
       throw new BridgeError("repeat_after_ms must be an integer between 60000 and 604800000", "invalid_activity_watch", 400);
     }
     if (existing && existing.enabled === input.enabled && existing.idle_after_ms === idleAfter
-      && existing.mode === mode && existing.repeat_after_ms === repeatAfter) return existing;
+      && existing.mode === mode && existing.repeat_after_ms === repeatAfter) {
+      this.channelTransaction([channel], this.nowIso(), [], false);
+      return existing;
+    }
     const now = this.nowIso();
     const binding = this.getBinding(channel);
     if (!existing) {
-      this.db.transaction([
+      this.channelTransaction([channel], now, [
         `INSERT INTO activity_watches(instance_id, attention_channel, enabled, idle_after_ms, endpoint_id, binding_generation, epoch, armed_at, last_nonwake_activity_at, activity_lease_expires_at, fired_epoch, mode, repeat_after_ms, sequence, last_triggered_at, next_due_at, updated_at)
-         VALUES(${sqlValue(this.config.instance_id)}, ${sqlValue(channel)}, ${sqlValue(input.enabled)}, ${idleAfter}, ${sqlValue(binding?.endpoint_id)}, ${sqlValue(binding?.generation)}, 1, NULL, NULL, NULL, NULL, ${sqlValue(mode)}, ${repeatAfter}, 0, NULL, NULL, ${sqlValue(now)});`,
+         SELECT ${sqlValue(this.config.instance_id)}, ${sqlValue(channel)}, ${sqlValue(input.enabled)}, ${idleAfter}, ${sqlValue(binding?.endpoint_id)}, ${sqlValue(binding?.generation)}, 1, NULL, NULL, NULL, NULL, ${sqlValue(mode)}, ${repeatAfter}, 0, NULL, NULL, ${sqlValue(now)} WHERE ${CHANNEL_WRITE_ALLOWED};`,
       ]);
     } else if (!existing.enabled && input.enabled) {
-      this.db.transaction([
-        `UPDATE activity_watches SET enabled=1, idle_after_ms=${idleAfter}, mode=${sqlValue(mode)}, repeat_after_ms=${repeatAfter}, endpoint_id=${sqlValue(binding?.endpoint_id)}, binding_generation=${sqlValue(binding?.generation)}, epoch=epoch+1, armed_at=NULL, last_nonwake_activity_at=NULL, activity_lease_expires_at=NULL, fired_epoch=NULL, sequence=0, last_triggered_at=NULL, next_due_at=NULL, updated_at=${sqlValue(now)} WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)};`,
+      this.channelTransaction([channel], now, [
+        `UPDATE activity_watches SET enabled=1, idle_after_ms=${idleAfter}, mode=${sqlValue(mode)}, repeat_after_ms=${repeatAfter}, endpoint_id=${sqlValue(binding?.endpoint_id)}, binding_generation=${sqlValue(binding?.generation)}, epoch=epoch+1, armed_at=NULL, last_nonwake_activity_at=NULL, activity_lease_expires_at=NULL, fired_epoch=NULL, sequence=0, last_triggered_at=NULL, next_due_at=NULL, updated_at=${sqlValue(now)} WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)} AND ${CHANNEL_WRITE_ALLOWED};`,
       ]);
     } else {
       const nextDueAt = input.enabled && mode === "repeat" && existing.fired_epoch === existing.epoch
         ? addMs(now, repeatAfter)
         : null;
-      this.db.transaction([
-        `UPDATE activity_watches SET enabled=${sqlValue(input.enabled)}, idle_after_ms=${idleAfter}, mode=${sqlValue(mode)}, repeat_after_ms=${repeatAfter}, activity_lease_expires_at=${sqlValue(input.enabled ? existing.activity_lease_expires_at : null)}, next_due_at=${sqlValue(nextDueAt)}, updated_at=${sqlValue(now)} WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)};`,
+      this.channelTransaction([channel], now, [
+        `UPDATE activity_watches SET enabled=${sqlValue(input.enabled)}, idle_after_ms=${idleAfter}, mode=${sqlValue(mode)}, repeat_after_ms=${repeatAfter}, activity_lease_expires_at=${sqlValue(input.enabled ? existing.activity_lease_expires_at : null)}, next_due_at=${sqlValue(nextDueAt)}, updated_at=${sqlValue(now)} WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(channel)} AND ${CHANNEL_WRITE_ALLOWED};`,
       ]);
     }
     return this.getActivityWatch(channel)!;
@@ -1192,6 +1500,7 @@ export class WakeBridge {
 
   observeActivity(input: ActivityObservation): ActivityObservationResult {
     if (!input?.attention_channel || !input.endpoint_id || !input.observation_id) throw new BridgeError("activity channel, endpoint and observation_id are required", "invalid_activity", 400);
+    this.assertChannelNotDeleted(input.attention_channel);
     if (input.observation_id.length > 256) throw new BridgeError("observation_id is too long", "invalid_activity", 400);
     const kinds = new Set(["owner_message_accepted", "activity_started", "activity_progress", "activity_settled", "wake_started", "wake_progress", "wake_settled"]);
     if (!kinds.has(input.kind)) throw new BridgeError("activity kind is invalid", "invalid_activity", 400);
@@ -1207,7 +1516,7 @@ export class WakeBridge {
     const configuredWatch = this.getActivityWatch(input.attention_channel);
     if (!configuredWatch?.enabled) return { duplicate: false, watch: configuredWatch };
     const insert = `INSERT OR IGNORE INTO activity_observations(instance_id, endpoint_id, binding_generation, observation_id, attention_channel, kind, observed_at, received_at)
-      VALUES(${sqlValue(this.config.instance_id)}, ${sqlValue(input.endpoint_id)}, ${input.generation}, ${sqlValue(input.observation_id)}, ${sqlValue(input.attention_channel)}, ${sqlValue(input.kind)}, ${sqlValue(observedAt)}, ${sqlValue(receivedAt)});`;
+      SELECT ${sqlValue(this.config.instance_id)}, ${sqlValue(input.endpoint_id)}, ${input.generation}, ${sqlValue(input.observation_id)}, ${sqlValue(input.attention_channel)}, ${sqlValue(input.kind)}, ${sqlValue(observedAt)}, ${sqlValue(receivedAt)} WHERE ${CHANNEL_WRITE_ALLOWED};`;
     const nonWakeActivity = input.kind === "owner_message_accepted"
       || input.kind === "activity_started"
       || input.kind === "activity_progress"
@@ -1225,7 +1534,7 @@ export class WakeBridge {
       || configuredWatch.fired_epoch === configuredWatch.epoch
     );
     const repeatNotBefore = addMs(receivedAt, configuredWatch.repeat_after_ms);
-    let update = "SELECT changes();";
+    let update = "";
     if (establishBaseline) {
       update = `UPDATE activity_watches SET endpoint_id=${sqlValue(input.endpoint_id)}, binding_generation=${input.generation}, epoch=CASE WHEN fired_epoch=epoch THEN epoch+1 ELSE epoch END, armed_at=${sqlValue(observedAt)}, last_nonwake_activity_at=${sqlValue(observedAt)}, activity_lease_expires_at=${sqlValue(input.kind === "activity_started" || input.kind === "activity_progress" ? leaseExpires : null)}, fired_epoch=NULL, sequence=0, last_triggered_at=NULL, next_due_at=NULL, updated_at=${sqlValue(receivedAt)} WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(input.attention_channel)} AND enabled=1 AND changes()>0;`;
     } else if (input.kind === "owner_message_accepted" || input.kind === "activity_started") {
@@ -1240,11 +1549,12 @@ export class WakeBridge {
       update = `UPDATE activity_watches SET activity_lease_expires_at=NULL, next_due_at=CASE WHEN mode='repeat' AND fired_epoch=epoch THEN ${sqlValue(repeatNotBefore)} ELSE next_due_at END, updated_at=${sqlValue(receivedAt)} WHERE instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(input.attention_channel)} AND enabled=1 AND endpoint_id=${sqlValue(input.endpoint_id)} AND binding_generation=${input.generation} AND changes()>0;`;
     }
     const before = this.db.query<DbRow>(`SELECT 1 AS present FROM activity_observations WHERE instance_id=${sqlValue(this.config.instance_id)} AND endpoint_id=${sqlValue(input.endpoint_id)} AND binding_generation=${input.generation} AND observation_id=${sqlValue(input.observation_id)} LIMIT 1;`)[0];
-    this.db.transaction([
-      `DELETE FROM activity_observations WHERE instance_id=${sqlValue(this.config.instance_id)} AND received_at<${sqlValue(addMs(receivedAt, -7 * 24 * 60 * 60_000))};`,
+    this.channelTransaction([input.attention_channel], receivedAt, [
+      this.channelBindingFenceSql(input.attention_channel, input.endpoint_id, input.generation, receivedAt, input.lease_token || ""),
+      `DELETE FROM activity_observations WHERE instance_id=${sqlValue(this.config.instance_id)} AND received_at<${sqlValue(addMs(receivedAt, -7 * 24 * 60 * 60_000))} AND ${CHANNEL_WRITE_ALLOWED};`,
       insert,
       update,
-    ]);
+    ], false);
     return { duplicate: Boolean(before), watch: this.getActivityWatch(input.attention_channel) };
   }
 
@@ -1253,6 +1563,7 @@ export class WakeBridge {
       || !Number.isSafeInteger(input.generation) || input.generation < 1) {
       throw new BridgeError("wake echo identity is invalid", "invalid_activity", 400);
     }
+    this.assertChannelNotDeleted(input.attention_channel);
     if (!input?.delivery_nonce || input.delivery_nonce.length > 256) {
       throw new BridgeError("delivery nonce is required and bounded", "invalid_delivery_nonce", 400);
     }
@@ -1272,7 +1583,7 @@ export class WakeBridge {
     const correlation = this.db.query<DbRow>(`SELECT dc.*, b.state AS batch_state, b.attempt AS batch_attempt,
         b.last_error AS batch_last_error, a.attempt_no AS attempt_no
       FROM delivery_correlations dc JOIN batches b ON b.id=dc.batch_id JOIN outbox_attempts a ON a.id=dc.attempt_id
-      WHERE b.instance_id=${sqlValue(this.config.instance_id)} AND dc.endpoint_id=${sqlValue(input.endpoint_id)}
+      WHERE b.instance_id=${sqlValue(this.config.instance_id)} AND b.attention_channel=${sqlValue(input.attention_channel)} AND dc.endpoint_id=${sqlValue(input.endpoint_id)}
         AND dc.binding_generation=${input.generation} AND dc.nonce_hash=${sqlValue(nonceHash)} LIMIT 1;`)[0];
     if (!correlation) throw new BridgeError("delivery nonce is unknown", "unknown_delivery_nonce", 409);
     if (String(correlation.state) !== "outstanding") throw new BridgeError("delivery nonce was already consumed or discarded", "delivery_nonce_replayed", 409);
@@ -1288,8 +1599,9 @@ export class WakeBridge {
     const canSetSeen = ["dispatching", "retry_wait", "dead_letter", "dispatched"].includes(batchState) || lateAck;
     const details = { attested_by: "host", evidence: "delivery_nonce_echo" };
     const statements = [
+      this.channelBindingFenceSql(input.attention_channel, input.endpoint_id, input.generation, now, input.lease_token || ""),
       `UPDATE delivery_correlations SET state='consumed', consumed_at=${sqlValue(now)}
-       WHERE attempt_id=${sqlValue(correlation.attempt_id)} AND state='outstanding';`,
+       WHERE attempt_id=${sqlValue(correlation.attempt_id)} AND state='outstanding' AND ${CHANNEL_WRITE_ALLOWED};`,
       `INSERT INTO receipts(id, batch_id, claim_id, stage, at, endpoint_id, binding_generation, transport_kind, details_json)
        SELECT ${sqlValue(id("rcpt"))}, ${sqlValue(correlation.batch_id)}, NULL, 'host_attested', ${sqlValue(now)}, ${sqlValue(input.endpoint_id)}, ${input.generation}, ${sqlValue(correlation.transport_kind)}, ${sqlJson(details)} WHERE changes()>0;`,
     ];
@@ -1298,12 +1610,13 @@ export class WakeBridge {
         `UPDATE batches SET state='seen', updated_at=${sqlValue(now)}, lease_expires_at=NULL, last_error=NULL
          WHERE id=${sqlValue(correlation.batch_id)} AND instance_id=${sqlValue(this.config.instance_id)}
            AND state=${sqlValue(batchState)} AND attempt=${Number(correlation.attempt_no)}
+           AND ${CHANNEL_WRITE_ALLOWED}
            ${lateAck ? "AND last_error='ack_timeout'" : ""};`,
         `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
          SELECT ${sqlValue(correlation.batch_id)}, ${sqlValue(batchState)}, 'seen', 'host_attested', ${sqlValue(now)} WHERE changes()>0;`,
       );
     }
-    this.db.transaction(statements);
+    this.channelTransaction([input.attention_channel], now, statements, false);
     return this.observeActivity({
       attention_channel: input.attention_channel,
       endpoint_id: input.endpoint_id,
@@ -1471,15 +1784,16 @@ export class WakeBridge {
       const resource = { uri: `wakebridge://activity-watch/${encodeURIComponent(watch.attention_channel)}/${watch.epoch}/${sequence}` };
       const initialPredicate = `(fired_epoch IS NULL OR fired_epoch<>epoch) AND sequence=${watch.sequence}`;
       const repeatPredicate = `fired_epoch=epoch AND mode='repeat' AND sequence=${watch.sequence} AND next_due_at IS NOT NULL AND next_due_at<=${sqlValue(now)}`;
-      const predicate = `instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(watch.attention_channel)} AND enabled=1 AND epoch=${watch.epoch} AND ${watch.fired_epoch === watch.epoch ? repeatPredicate : initialPredicate} AND endpoint_id=${sqlValue(binding.endpoint_id)} AND binding_generation=${binding.generation}`;
+      const activeChannel = `EXISTS(SELECT 1 FROM attention_channels c WHERE c.instance_id=${sqlValue(this.config.instance_id)} AND c.attention_channel=${sqlValue(watch.attention_channel)} AND c.deleted_at IS NULL)`;
+      const predicate = `instance_id=${sqlValue(this.config.instance_id)} AND attention_channel=${sqlValue(watch.attention_channel)} AND enabled=1 AND epoch=${watch.epoch} AND ${watch.fired_epoch === watch.epoch ? repeatPredicate : initialPredicate} AND endpoint_id=${sqlValue(binding.endpoint_id)} AND binding_generation=${binding.generation} AND ${activeChannel}`;
       this.db.transaction([
         `INSERT OR IGNORE INTO events(id, instance_id, owner_id, source, type, schema_version, occurred_at, received_at, dedupe_key, coalesce_key, priority_hint, attention_channel_hint, actor_ref, resource_json, metadata_json, payload_preview, matched_policy_id, matched_policy_version)
          SELECT ${sqlValue(eventId)}, ${sqlValue(this.config.instance_id)}, ${sqlValue(this.config.owner_id)}, 'wakebridge.core', 'channel.inactive', 1, ${sqlValue(now)}, ${sqlValue(now)}, ${sqlValue(dedupeKey)}, ${sqlValue(watch.attention_channel)}, 'normal', ${sqlValue(watch.attention_channel)}, ${sqlValue(this.config.owner_id)}, ${sqlJson(resource)}, ${sqlJson({ origin: "inactivity_watch", reason_code: "host_inactive", epoch: watch.epoch, idle_after_ms: watch.idle_after_ms, mode: watch.mode, sequence })}, NULL, 'inactivity_watch', 1 FROM activity_watches WHERE ${predicate};`,
-        `INSERT OR IGNORE INTO event_status(event_id, state, updated_at) SELECT ${sqlValue(eventId)}, 'matched', ${sqlValue(now)} FROM events WHERE id=${sqlValue(eventId)};`,
-        `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at) SELECT ${sqlValue(eventId)}, NULL, 'matched', 'inactivity_watch', ${sqlValue(now)} WHERE EXISTS (SELECT 1 FROM events WHERE id=${sqlValue(eventId)}) AND NOT EXISTS (SELECT 1 FROM event_transitions WHERE event_id=${sqlValue(eventId)});`,
+        `INSERT OR IGNORE INTO event_status(event_id, state, updated_at) SELECT ${sqlValue(eventId)}, 'matched', ${sqlValue(now)} FROM events WHERE id=${sqlValue(eventId)} AND ${activeChannel};`,
+        `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at) SELECT ${sqlValue(eventId)}, NULL, 'matched', 'inactivity_watch', ${sqlValue(now)} WHERE EXISTS (SELECT 1 FROM events WHERE id=${sqlValue(eventId)}) AND NOT EXISTS (SELECT 1 FROM event_transitions WHERE event_id=${sqlValue(eventId)}) AND ${activeChannel};`,
         `INSERT OR IGNORE INTO claims(id, instance_id, origin, event_ids_json, resource_json, policy_id, policy_version, attention_channel, eligible_after, expires_at, defer_while_presence, state, reason_code, note, created_at, updated_at, snooze_until, consumed_result_json, dismissed_reason)
-         SELECT ${sqlValue(claimId)}, ${sqlValue(this.config.instance_id)}, 'inactivity_watch', ${sqlJson([eventId])}, ${sqlJson(resource)}, 'inactivity_watch', 1, ${sqlValue(watch.attention_channel)}, ${sqlValue(now)}, NULL, 1, 'pending', 'host_inactive', NULL, ${sqlValue(now)}, ${sqlValue(now)}, NULL, NULL, NULL FROM events WHERE id=${sqlValue(eventId)};`,
-        `INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT ${sqlValue(claimId)}, NULL, 'pending', 'inactivity_watch', ${sqlValue(now)} WHERE EXISTS (SELECT 1 FROM claims WHERE id=${sqlValue(claimId)}) AND NOT EXISTS (SELECT 1 FROM claim_transitions WHERE claim_id=${sqlValue(claimId)});`,
+         SELECT ${sqlValue(claimId)}, ${sqlValue(this.config.instance_id)}, 'inactivity_watch', ${sqlJson([eventId])}, ${sqlJson(resource)}, 'inactivity_watch', 1, ${sqlValue(watch.attention_channel)}, ${sqlValue(now)}, NULL, 1, 'pending', 'host_inactive', NULL, ${sqlValue(now)}, ${sqlValue(now)}, NULL, NULL, NULL FROM events WHERE id=${sqlValue(eventId)} AND ${activeChannel};`,
+        `INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT ${sqlValue(claimId)}, NULL, 'pending', 'inactivity_watch', ${sqlValue(now)} WHERE EXISTS (SELECT 1 FROM claims WHERE id=${sqlValue(claimId)}) AND NOT EXISTS (SELECT 1 FROM claim_transitions WHERE claim_id=${sqlValue(claimId)}) AND ${activeChannel};`,
         `UPDATE activity_watches SET fired_epoch=epoch, sequence=${sequence}, last_triggered_at=${sqlValue(now)}, next_due_at=${sqlValue(watch.mode === "repeat" ? addMs(now, watch.repeat_after_ms) : null)}, activity_lease_expires_at=NULL, updated_at=${sqlValue(now)} WHERE ${predicate} AND EXISTS (SELECT 1 FROM claims WHERE id=${sqlValue(claimId)});`,
       ]);
       const after = this.getActivityWatch(watch.attention_channel);
@@ -1631,10 +1945,10 @@ export class WakeBridge {
     ];
   }
 
-  private claimEventStateSql(claimId: string, claimState: ClaimState, state: EventState, now: string, reason: string): string[] {
+  private claimEventStateSql(claimId: string, claimState: ClaimState, state: EventState, now: string, reason: string, condition = "1"): string[] {
     // Read membership and the audit's from_state inside the writing transaction.
     // A failed claim CAS must not finalize or batch its events independently.
-    const membership = `SELECT j.value FROM claims c, json_each(c.event_ids_json) j WHERE c.id=${sqlValue(claimId)} AND c.state=${sqlValue(claimState)}`;
+    const membership = `SELECT j.value FROM claims c, json_each(c.event_ids_json) j WHERE c.id=${sqlValue(claimId)} AND c.state=${sqlValue(claimState)} AND ${condition}`;
     return [
       `INSERT INTO event_transitions(event_id, from_state, to_state, reason, at) SELECT event_id, state, ${sqlValue(state)}, ${sqlValue(reason)}, ${sqlValue(now)} FROM event_status WHERE event_id IN (${membership}) AND state<>${sqlValue(state)};`,
       `UPDATE event_status SET state=${sqlValue(state)}, updated_at=${sqlValue(now)} WHERE event_id IN (${membership}) AND state<>${sqlValue(state)};`,
@@ -1908,6 +2222,7 @@ export class WakeBridge {
        WHERE id=${sqlValue(batch.id)} AND instance_id=${sqlValue(this.config.instance_id)} AND state IN ('pending','retry_wait','waiting_for_endpoint')
        AND not_before<=${sqlValue(now)} AND (state='waiting_for_endpoint' OR deadline IS NULL OR deadline<=${sqlValue(now)})
        AND claim_ids_json=${sqlJson(batch.claim_ids)} AND event_ids_json=${sqlJson(batch.event_ids)} AND (${gateFence})
+       AND EXISTS (SELECT 1 FROM attention_channels c WHERE c.instance_id=batches.instance_id AND c.attention_channel=batches.attention_channel AND c.deleted_at IS NULL)
        AND NOT EXISTS (SELECT 1 FROM json_each(batches.claim_ids_json) j JOIN claims c ON c.id=j.value
          WHERE c.state='batched' AND c.expires_at IS NOT NULL AND c.expires_at<=${sqlValue(now)});`,
       `INSERT INTO outbox_attempts(id, batch_id, attempt_no, state, transport_kind, endpoint_id, binding_generation, leased_until, started_at)
@@ -2084,12 +2399,26 @@ export class WakeBridge {
         continue;
       }
       const deliveryNonce = randomBytes(24).toString("base64url");
+      const correlationCreatedAt = dispatchNow().toISOString();
+      const dispatchFence = `EXISTS (SELECT 1 FROM batches b JOIN outbox_attempts a ON a.batch_id=b.id
+        JOIN attention_channels c ON c.instance_id=b.instance_id AND c.attention_channel=b.attention_channel
+        JOIN bindings binding ON binding.instance_id=b.instance_id AND binding.attention_channel=b.attention_channel
+        WHERE b.id=${sqlValue(acquired.batch.id)} AND b.state='dispatching' AND b.last_error=${sqlValue(acquired.attemptId)}
+          AND a.id=${sqlValue(acquired.attemptId)} AND a.state='leased' AND c.deleted_at IS NULL
+          AND binding.endpoint_id=${sqlValue(resolved.binding.endpoint_id)} AND binding.generation=${resolved.binding.generation})`;
+      const deliveryStatements: string[] = [];
       if (transport.capabilities?.session_activity_observable) {
-        const correlationCreatedAt = dispatchNow().toISOString();
-        this.db.transaction([
+        deliveryStatements.push(
           `INSERT INTO delivery_correlations(attempt_id, batch_id, endpoint_id, binding_generation, transport_kind, nonce_hash, state, created_at, expires_at, consumed_at)
-           VALUES(${sqlValue(acquired.attemptId)}, ${sqlValue(acquired.batch.id)}, ${sqlValue(resolved.binding.endpoint_id)}, ${resolved.binding.generation}, ${sqlValue(transport.kind)}, ${sqlValue(sha256(deliveryNonce))}, 'outstanding', ${sqlValue(correlationCreatedAt)}, ${sqlValue(addMs(correlationCreatedAt, 60 * 60_000))}, NULL);`,
-        ]);
+           SELECT ${sqlValue(acquired.attemptId)}, ${sqlValue(acquired.batch.id)}, ${sqlValue(resolved.binding.endpoint_id)}, ${resolved.binding.generation}, ${sqlValue(transport.kind)}, ${sqlValue(sha256(deliveryNonce))}, 'outstanding', ${sqlValue(correlationCreatedAt)}, ${sqlValue(addMs(correlationCreatedAt, 60 * 60_000))}, NULL WHERE ${dispatchFence};`,
+        );
+      }
+      const dispatchable = this.db.query<{ current: number }>([
+        "BEGIN IMMEDIATE;", ...deliveryStatements, `SELECT 1 AS current WHERE ${dispatchFence};`, "COMMIT;",
+      ].join("\n"));
+      if (!dispatchable.length) {
+        results.push({ batch_id: listed.id, status: "skipped", attempt_id: acquired.attemptId, error_class: "stale_attempt" });
+        continue;
       }
       const context: TransportContext = {
         batch: acquired.batch,
@@ -2117,15 +2446,15 @@ export class WakeBridge {
     return results;
   }
 
-  private receiptInsertSql(receipt: Receipt): string {
+  private receiptInsertSql(receipt: Receipt, condition = "1"): string {
     return `INSERT INTO receipts(id, batch_id, claim_id, stage, at, endpoint_id, binding_generation, transport_kind, details_json)
-      VALUES(${sqlValue(receipt.id)}, ${sqlValue(receipt.batch_id)}, ${sqlValue(receipt.claim_id)}, ${sqlValue(receipt.stage)}, ${sqlValue(receipt.at)}, ${sqlValue(receipt.endpoint_id)}, ${sqlValue(receipt.binding_generation)}, ${sqlValue(receipt.transport_kind)}, ${sqlJson(receipt.details)});`;
+      SELECT ${sqlValue(receipt.id)}, ${sqlValue(receipt.batch_id)}, ${sqlValue(receipt.claim_id)}, ${sqlValue(receipt.stage)}, ${sqlValue(receipt.at)}, ${sqlValue(receipt.endpoint_id)}, ${sqlValue(receipt.binding_generation)}, ${sqlValue(receipt.transport_kind)}, ${sqlJson(receipt.details)} WHERE ${condition};`;
   }
 
-  private detachClaimFromOpenBatches(claimId: string, state: ClaimState, now: string, snoozeUntil: string | null): string[] {
+  private detachClaimFromOpenBatches(claimId: string, state: ClaimState, now: string, snoozeUntil: string | null, condition = "1"): string[] {
     const claimFence = `EXISTS (SELECT 1 FROM claims WHERE id=${sqlValue(claimId)} AND state=${sqlValue(state)}${snoozeUntil == null ? "" : ` AND snooze_until=${sqlValue(snoozeUntil)} AND eligible_after=${sqlValue(snoozeUntil)}`})`;
     const predicate = `instance_id=${sqlValue(this.config.instance_id)} AND state IN (${OPEN_BATCH_STATES.map(sqlValue).join(",")})
-      AND EXISTS (SELECT 1 FROM json_each(batches.claim_ids_json) WHERE value=${sqlValue(claimId)}) AND ${claimFence}`;
+      AND EXISTS (SELECT 1 FROM json_each(batches.claim_ids_json) WHERE value=${sqlValue(claimId)}) AND ${claimFence} AND ${condition}`;
     const emptied = "json_array_length(claim_ids_json)=1";
     const reason = snoozeUntil == null ? "all_claims_finalized" : "all_claims_snoozed";
     // Inspect and filter the arrays under the transaction lock. Other claims
@@ -2182,6 +2511,7 @@ export class WakeBridge {
   ackBatch(batchId: string, endpointId: string, generation: number): WakeBatch {
     const batch = this.getBatch(batchId);
     if (!batch) throw new BridgeError("batch not found", "batch_not_found", 404);
+    this.assertChannelNotDeleted(batch.attention_channel);
     const accepted = this.acceptedAttempt(batchId, batch.attempt);
     const acceptedMatches = Boolean(accepted && String(accepted.endpoint_id) === endpointId && Number(accepted.binding_generation) === generation);
     const binding = this.getBinding(batch.attention_channel);
@@ -2192,13 +2522,14 @@ export class WakeBridge {
       if (!receipts.some((receipt) => receipt.stage === "host_attested")) return batch;
       if (!acceptedMatches || !bindingMatches) throw new BridgeError("batch acknowledgement is fenced by endpoint/generation", "stale_generation", 409);
       const now = this.nowIso();
-      this.db.transaction([
+      this.channelTransaction([batch.attention_channel], now, [
+        this.channelBindingFenceSql(batch.attention_channel, endpointId, generation, now),
         `INSERT INTO receipts(id, batch_id, claim_id, stage, at, endpoint_id, binding_generation, transport_kind, details_json)
          SELECT ${sqlValue(id("rcpt"))}, ${sqlValue(batchId)}, NULL, 'agent_seen', ${sqlValue(now)}, ${sqlValue(endpointId)}, ${generation}, ${sqlValue(String(accepted!.transport_kind || "unknown"))}, ${sqlJson({ after: "host_attested" })}
-         WHERE NOT EXISTS (SELECT 1 FROM receipts WHERE batch_id=${sqlValue(batchId)} AND stage='agent_seen');`,
+         WHERE ${CHANNEL_WRITE_ALLOWED} AND NOT EXISTS (SELECT 1 FROM receipts WHERE batch_id=${sqlValue(batchId)} AND stage='agent_seen');`,
         `INSERT INTO batch_transitions(batch_id, from_state, to_state, reason, at)
          SELECT ${sqlValue(batchId)}, 'seen', 'seen', 'agent_ack', ${sqlValue(now)} WHERE changes()>0;`,
-      ]);
+      ], false);
       return this.getBatch(batchId)!;
     }
     const lateAck = batch.state === "needs_attention" && batch.last_error === "ack_timeout";
@@ -2212,11 +2543,12 @@ export class WakeBridge {
     }
     if (!bindingMatches) throw new BridgeError("batch acknowledgement targets stale binding", "stale_generation", 409);
     const now = this.nowIso();
-    this.db.transaction([
+    this.channelTransaction([batch.attention_channel], now, [
+      this.channelBindingFenceSql(batch.attention_channel, endpointId, generation, now),
       `UPDATE batches SET state='seen', updated_at=${sqlValue(now)}, lease_expires_at=NULL, last_error=${lateAck ? "NULL" : "last_error"}
        WHERE id=${sqlValue(batchId)} AND instance_id=${sqlValue(this.config.instance_id)}
          AND state=${sqlValue(batch.state)} ${lateAck ? "AND last_error='ack_timeout'" : ""}
-         AND attempt=${Number(accepted.attempt_no)} AND binding_generation=${generation};`,
+         AND attempt=${Number(accepted.attempt_no)} AND binding_generation=${generation} AND ${CHANNEL_WRITE_ALLOWED};`,
       // Keep the transition INSERT immediately after the CAS so changes()
       // refers to that UPDATE.  The receipt follows it and is conditional on
       // the transition INSERT, so a stale/concurrent ack cannot leave a
@@ -2226,7 +2558,7 @@ export class WakeBridge {
       `INSERT INTO receipts(id, batch_id, claim_id, stage, at, endpoint_id, binding_generation, transport_kind, details_json)
         SELECT ${sqlValue(id("rcpt"))}, ${sqlValue(batchId)}, NULL, 'agent_seen', ${sqlValue(now)}, ${sqlValue(endpointId)}, ${generation}, ${sqlValue(String(accepted.transport_kind || "unknown"))}, NULL
         WHERE changes()>0;`,
-    ]);
+    ], false);
     const current = this.getBatch(batchId);
     if (!current) throw new BridgeError("batch not found", "batch_not_found", 404);
     if (current.state === "seen") return current;
@@ -2236,18 +2568,24 @@ export class WakeBridge {
   recordReceipt(batchId: string, stage: ReceiptStage, details?: Record<string, JsonValue> | null, endpointId?: string, generation?: number): Receipt {
     const batch = this.getBatch(batchId);
     if (!batch) throw new BridgeError("batch not found", "batch_not_found", 404);
+    this.assertChannelNotDeleted(batch.attention_channel);
     if (["agent_seen", "agent_consumed", "agent_acted"].includes(stage) && endpointId && generation != null) {
       const binding = this.getBinding(batch.attention_channel);
       if (!binding || binding.endpoint_id !== endpointId || binding.generation !== generation) throw new BridgeError("receipt target is stale", "stale_generation", 409);
     }
     const receipt: Receipt = { id: id("rcpt"), batch_id: batchId, stage, at: this.nowIso(), endpoint_id: endpointId ?? null, binding_generation: generation ?? null, transport_kind: null, details: details ?? null };
-    this.db.exec(this.receiptInsertSql(receipt));
+    this.channelTransaction([batch.attention_channel], receipt.at, [
+      ...(["agent_seen", "agent_consumed", "agent_acted"].includes(stage) && endpointId && generation != null
+        ? [this.channelBindingFenceSql(batch.attention_channel, endpointId, generation, receipt.at)] : []),
+      this.receiptInsertSql(receipt, CHANNEL_WRITE_ALLOWED),
+    ], false);
     return receipt;
   }
 
   private claimAction(claimId: string, action: "snooze" | "dismiss" | "consume", value?: string | JsonValue | null): AttentionClaim {
     const claim = this.getClaim(claimId);
     if (!claim) throw new BridgeError("claim not found", "claim_not_found", 404);
+    this.assertChannelNotDeleted(claim.attention_channel);
     if (FINALIZED_CLAIM_STATES.includes(claim.state)) return claim;
     const now = this.nowIso();
     const nextState: ClaimState = action === "snooze" ? "pending" : action === "dismiss" ? "dismissed" : "consumed";
@@ -2255,7 +2593,7 @@ export class WakeBridge {
     // which is the most recent batch when a snoozed claim was re-batched.
     const batch = this.batchesContainingClaim(claimId).at(-1);
     const statements = [
-      `UPDATE claims SET state=${sqlValue(nextState)}, eligible_after=${sqlValue(action === "snooze" ? String(value) : claim.eligible_after)}, snooze_until=${sqlValue(action === "snooze" ? String(value) : null)}, consumed_result_json=${sqlJson(action === "consume" ? value : null)}, dismissed_reason=${sqlValue(action === "dismiss" ? String(value || "dismissed") : null)}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(claimId)} AND state=${sqlValue(claim.state)} AND eligible_after=${sqlValue(claim.eligible_after)} AND snooze_until IS ${sqlValue(claim.snooze_until)};`,
+      `UPDATE claims SET state=${sqlValue(nextState)}, eligible_after=${sqlValue(action === "snooze" ? String(value) : claim.eligible_after)}, snooze_until=${sqlValue(action === "snooze" ? String(value) : null)}, consumed_result_json=${sqlJson(action === "consume" ? value : null)}, dismissed_reason=${sqlValue(action === "dismiss" ? String(value || "dismissed") : null)}, updated_at=${sqlValue(now)} WHERE id=${sqlValue(claimId)} AND state=${sqlValue(claim.state)} AND eligible_after=${sqlValue(claim.eligible_after)} AND snooze_until IS ${sqlValue(claim.snooze_until)} AND ${CHANNEL_WRITE_ALLOWED};`,
       `INSERT INTO claim_transitions(claim_id, from_state, to_state, reason, at) SELECT ${sqlValue(claimId)}, ${sqlValue(claim.state)}, ${sqlValue(nextState)}, ${sqlValue(action)}, ${sqlValue(now)} WHERE changes()>0;`,
     ];
     if (batch && action !== "snooze") {
@@ -2263,11 +2601,11 @@ export class WakeBridge {
       statements.push(`INSERT INTO receipts(id, batch_id, claim_id, stage, at, endpoint_id, binding_generation, transport_kind, details_json)
         SELECT ${sqlValue(id("rcpt"))}, ${sqlValue(batch.id)}, ${sqlValue(claimId)}, 'agent_consumed', ${sqlValue(now)}, NULL, NULL, NULL, ${sqlJson(details)} WHERE changes()>0;`);
     }
-    statements.push(...this.detachClaimFromOpenBatches(claimId, nextState, now, action === "snooze" ? String(value) : null));
+    statements.push(...this.detachClaimFromOpenBatches(claimId, nextState, now, action === "snooze" ? String(value) : null, CHANNEL_WRITE_ALLOWED));
     if (action !== "snooze") {
-      statements.push(...this.claimEventStateSql(claimId, nextState, "consumed", now, action));
+      statements.push(...this.claimEventStateSql(claimId, nextState, "consumed", now, action, CHANNEL_WRITE_ALLOWED));
     }
-    this.db.transaction(statements);
+    this.channelTransaction([claim.attention_channel], now, statements, false);
     return this.getClaim(claimId)!;
   }
 

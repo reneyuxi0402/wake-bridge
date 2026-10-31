@@ -11,7 +11,7 @@ export interface HostBootstrapCredential {
   token: string;
   adapter_kind: string;
   host_kind: string;
-  attention_channels: string[];
+  attention_channels: string[] | "*";
 }
 
 /** Core-owned orchestration. This class is intentionally not a package export. */

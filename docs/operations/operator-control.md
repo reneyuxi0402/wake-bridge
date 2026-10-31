@@ -1,6 +1,6 @@
 # Operator status and dead-letter recovery
 
-状态：introduced in `wake-bridge@0.9.0-preview.3`; current in `0.9.0-preview.20`。
+状态：introduced in `wake-bridge@0.9.0-preview.3`; current source candidate `0.9.0-preview.21`（尚未发布），npm 基线仍为 preview.20。
 
 这组命令面向单 Agent Space 的 operator，不属于第三方 SDK，也不进入 agent MCP。它只补运行态定位与永久投递失败的受控
 恢复，不替 agent 判断来源工作是否仍需处理。
@@ -41,6 +41,26 @@ credential 不能调用该 endpoint。
 `ok=false` 与 CLI exit code `2` 只对应 `needs_attention`；`degraded` 仍返回 exit code `0`，但应由监控展示。Status 不返回 route
 address、lease token、session ref、provider error message、source credential 或 owner token。它只保留安全的 error class；详细 provider
 错误仍留在本地 DB/operator evidence 中，不进入结构化 health payload。
+
+### Channel ingest 抑制（preview.21 候选）
+
+离线 `status` 与 live `/v1/status` 均提供 `ingest.channel_suppressions`：
+
+- `counts.channel_deleted` / `counts.channel_limit_reached`：当前数据库保留的来源 ingest 抑制记录数量；不是跨备份恢复的终身计数。现有 `prune-history` 保留事件和 transitions，不会清掉这些计数；
+- `latest_at`：最近抑制时间，没有记录时为 null；
+- `recent`：最近至多20条，仅 `event_id`、`source`、`matched_policy_id`、`matched_policy_version`、`reason`、`at`，不含 payload。
+
+这里只统计 ingest 时从 received 进入 suppressed 的两类原因，不把删除既有工作产生的取消计入。
+额度不足的隐式来源 emit 落盘 suppressed、不创建 channel/claim，cursor 可继续；已删目标同理。
+显式 create/schedule/watch/host 注册额度不足仍返回429。释放额度不会补发，原 dedupe 重放仍 suppressed。
+这些历史诊断不单独改变 `health`、`attention_required` 或 exit code，不新增永久 incident。
+因此 source 健康只表示来源流程可继续，不表示每条事件都产生了唤醒。Status 各部分分别查询，并发摄取时计数与 recent 可能短暂不一致。
+MCP `attention_event_list` 与 `attention_wake_health.events` 的紧凑事件也提供 `suppression_reason`（两原因或 null），不包含 provider payload。
+
+默认删除 channel 遇当前 binding、启用 activity watch 或当前启用受支持 policy 的字面 target 返回 `409 channel_in_use`，
+安全 usage 包含 `binding: null | {endpoint_id,generation}`、`activity_watch: boolean` 与 `policies: [{id,version}]`。
+Agent MCP 和 owner HTTP 都需显式严格 boolean `force:true` 才能强制删除使用中的路；无 restore、不复用 ID。
+在途宿主消息无法追回；ack/consume 的 `channel_deleted` 为终态，不以重试或自动代 consume 消除它。操作见 [多路接入](multi-agent-channels.md)。
 
 ## 安全错误诊断（preview.20 起）
 

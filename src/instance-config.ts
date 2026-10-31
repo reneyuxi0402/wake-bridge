@@ -22,6 +22,7 @@ export interface WakeBridgeInstanceConfigFile {
   quiet_hours?: QuietHoursConfig | null;
   admin_token: string;
   ack_timeout_ms?: number;
+  max_channels?: number;
   incident_attention_channel?: string;
 }
 
@@ -70,6 +71,9 @@ export function loadInstanceConfig(path: string): WakeBridgeInstanceConfigFile {
     new Intl.DateTimeFormat("en-US", { timeZone: config.timezone }).format(new Date());
   } catch {
     throw new BridgeError("instance config timezone is invalid", "invalid_instance_config", 400);
+  }
+  if (config.max_channels !== undefined && (!Number.isSafeInteger(config.max_channels) || config.max_channels < 1 || config.max_channels > 1024)) {
+    throw new BridgeError("instance config max_channels must be an integer between 1 and 1024", "invalid_instance_config", 400);
   }
   return config as WakeBridgeInstanceConfigFile;
 }
@@ -208,6 +212,7 @@ export function bridgeConfigFromFile(path: string): BridgeConfig {
     ...(config.quiet_hours === undefined ? {} : { quiet_hours: config.quiet_hours }),
     admin_token: config.admin_token,
     ...(config.ack_timeout_ms === undefined ? {} : { ack_timeout_ms: config.ack_timeout_ms }),
+    ...(config.max_channels === undefined ? {} : { max_channels: config.max_channels }),
     ...(config.incident_attention_channel === undefined ? {} : { incident_attention_channel: config.incident_attention_channel }),
   };
 }

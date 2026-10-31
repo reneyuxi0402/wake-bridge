@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { WakeBridge, BridgeError } from "./core.js";
+import { WakeBridge, BridgeError, ChannelInUseError } from "./core.js";
 import type { BridgeConfig, JsonValue, SourceConnectorConfig, SourceSupervisorStatus } from "./types.js";
 import {
   validateEndpointForAdapter,
@@ -39,6 +39,35 @@ function jsonResponse(response: ServerResponse, status: number, value: unknown):
   response.setHeader("content-type", "application/json; charset=utf-8");
   response.setHeader("content-length", Buffer.byteLength(body));
   response.end(body);
+}
+
+function channelFields(body: Record<string, unknown>, allowed: string[]): void {
+  if (Object.keys(body).some((key) => !allowed.includes(key))) {
+    throw new BridgeError("unsupported channel fields", "invalid_arguments", 400);
+  }
+}
+
+function channelString(body: Record<string, unknown>, field: string): string {
+  const value = body[field];
+  if (typeof value !== "string" || !value.trim() || value.length > 200 || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new BridgeError(`${field} must be a bounded printable string`, "invalid_arguments", 400);
+  }
+  return value;
+}
+
+function hostChannelScope(bridge: WakeBridge, credential: HostBootstrapCredential): string[] {
+  return credential.attention_channels === "*"
+    ? bridge.listChannels().map((channel) => channel.attention_channel)
+    : credential.attention_channels;
+}
+
+function requireActiveHostChannels(bridge: WakeBridge, credential: HostBootstrapCredential, channels: string[]): void {
+  if (credential.attention_channels !== "*") return;
+  for (const id of channels) {
+    const channel = bridge.getChannel(id);
+    if (!channel) throw new BridgeError("attention channel is unknown", "channel_not_found", 404);
+    if (channel.deleted_at) throw new BridgeError("attention channel is deleted", "channel_deleted", 409);
+  }
 }
 
 function operationalWarning(phase: "scheduler_tick" | "scheduler_dispatch" | "host_adapter_cleanup", error: unknown): void {
@@ -177,7 +206,7 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
   const hostCredentialIds = new Set<string>();
   for (const credential of hostCredentials) {
     if (!credential.id || credential.token.length < MIN_SECRET_LENGTH || !credential.adapter_kind || !credential.host_kind
-      || !Array.isArray(credential.attention_channels) || !credential.attention_channels.length) {
+      || (credential.attention_channels !== "*" && (!Array.isArray(credential.attention_channels) || !credential.attention_channels.length))) {
       throw new BridgeError("host bootstrap credential is invalid", "invalid_host_credential", 400);
     }
     if (hostCredentialIds.has(credential.id)) {
@@ -221,12 +250,19 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
           throw new BridgeError("host credential does not match adapter manifest", "invalid_host_credential", 400);
         }
         const sessionRef = typeof body.session_ref === "string" ? body.session_ref.trim() : "";
-        const attentionChannel = typeof body.attention_channel === "string" ? body.attention_channel.trim() : "";
+        const singleChannel = Object.hasOwn(body, "attention_channel");
+        const multipleChannels = Object.hasOwn(body, "attention_channels");
+        const rawChannels: unknown = singleChannel ? [body.attention_channel] : body.attention_channels;
+        const attentionChannels = Array.isArray(rawChannels)
+          ? rawChannels.map((channel: unknown) => typeof channel === "string" ? channel.trim() : "") : [];
         const routeAddress = body.route_address;
-        if (!sessionRef || sessionRef.length > 256 || !attentionChannel || !credential.attention_channels.includes(attentionChannel)
+        if (singleChannel === multipleChannels || !sessionRef || sessionRef.length > 256 || /[\u0000-\u001f\u007f]/u.test(sessionRef)
+          || !attentionChannels.length || attentionChannels.some((channel) => !channel || channel.length > 200 || /[\u0000-\u001f\u007f]/u.test(channel) || (credential.attention_channels !== "*" && !credential.attention_channels.includes(channel)))
+          || new Set(attentionChannels).size !== attentionChannels.length
           || !routeAddress || typeof routeAddress !== "object" || Array.isArray(routeAddress)) {
           throw new BridgeError("host session registration is invalid or outside credential scope", "invalid_host_session", 400);
         }
+        requireActiveHostChannels(bridge, credential, attentionChannels);
         const routeToken = typeof routeAddress.token === "string" ? routeAddress.token : "";
         const reservedTokens = [bridge.config.admin_token, ...hostCredentials.map((item) => item.token), ...sourceCredentials.map((item) => item.token)]
           .filter((token): token is string => Boolean(token));
@@ -248,10 +284,10 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
             ? `host session route is invalid: ${error.message}`
             : "host session route is invalid; check the adapter route configuration", "invalid_host_session", 400);
         }
-        const currentGeneration = bridge.getBinding(attentionChannel)?.generation ?? 0;
-        const endpoint = bridge.registerEndpoint(registration);
-        const binding = bridge.takeover(attentionChannel, endpoint.id, currentGeneration);
-        jsonResponse(response, 201, { endpoint: hostSessionEndpoint(endpoint), binding });
+        const { endpoint, bindings } = bridge.registerHostSession(registration, attentionChannels);
+        jsonResponse(response, 201, singleChannel
+          ? { endpoint: hostSessionEndpoint(endpoint), binding: bindings[0] }
+          : { endpoint: hostSessionEndpoint(endpoint), bindings });
         return;
       }
       if (method === "POST" && hostSessionRoute && parts[2] === "close" && parts.length === 3) {
@@ -265,7 +301,7 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
         const sessionRef = typeof body.session_ref === "string" ? body.session_ref.trim() : "";
         const attentionChannel = typeof body.attention_channel === "string" ? body.attention_channel.trim() : "";
         const expectedGeneration = Number(body.expected_generation);
-        if (!sessionRef || sessionRef.length > 256 || !credential.attention_channels.includes(attentionChannel)
+        if (!sessionRef || sessionRef.length > 256 || !attentionChannel || (credential.attention_channels !== "*" && !credential.attention_channels.includes(attentionChannel))
           || !Number.isSafeInteger(expectedGeneration) || expectedGeneration < 1) {
           throw new BridgeError("host session close is invalid or outside credential scope", "invalid_host_session", 400);
         }
@@ -274,7 +310,8 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
         if (!endpoint || endpoint.host_kind !== credential.host_kind || endpoint.session_ref !== sessionRef) {
           throw new BridgeError("host session endpoint is unknown", "endpoint_not_found", 404);
         }
-        const revoked = bridge.revokeBoundEndpoint(id, attentionChannel, expectedGeneration);
+        requireActiveHostChannels(bridge, credential, [attentionChannel]);
+        const revoked = bridge.revokeBoundEndpoint(id, attentionChannel, expectedGeneration, hostChannelScope(bridge, credential));
         jsonResponse(response, 200, { endpoint: hostSessionEndpoint(revoked) });
         return;
       }
@@ -289,7 +326,7 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
         const sessionRef = typeof body.session_ref === "string" ? body.session_ref.trim() : "";
         const attentionChannel = typeof body.attention_channel === "string" ? body.attention_channel.trim() : "";
         const expectedGeneration = Number(body.expected_generation);
-        if (!sessionRef || sessionRef.length > 256 || !credential.attention_channels.includes(attentionChannel)
+        if (!sessionRef || sessionRef.length > 256 || !attentionChannel || (credential.attention_channels !== "*" && !credential.attention_channels.includes(attentionChannel))
           || !Number.isSafeInteger(expectedGeneration) || expectedGeneration < 1) {
           throw new BridgeError("host session renewal is invalid or outside credential scope", "invalid_host_session", 400);
         }
@@ -298,7 +335,8 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
         if (!endpoint || endpoint.host_kind !== credential.host_kind || endpoint.session_ref !== sessionRef) {
           throw new BridgeError("host session endpoint is unknown", "endpoint_not_found", 404);
         }
-        const renewed = bridge.renewBoundEndpoint(id, attentionChannel, expectedGeneration);
+        requireActiveHostChannels(bridge, credential, [attentionChannel]);
+        const renewed = bridge.renewBoundEndpoint(id, attentionChannel, expectedGeneration, undefined, hostChannelScope(bridge, credential));
         jsonResponse(response, 200, { endpoint: hostSessionEndpoint(renewed), binding: bridge.getBinding(attentionChannel) });
         return;
       }
@@ -364,6 +402,28 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
         return;
       }
       const body = method === "GET" || method === "HEAD" ? {} : await readJson(request);
+      if (parts[0] === "v1" && parts[1] === "channels") {
+        if (method === "GET" && parts.length === 2) {
+          jsonResponse(response, 200, { max_channels: bridge.config.max_channels, channels: bridge.listChannels() });
+          return;
+        }
+        if (method === "POST" && parts.length === 2) {
+          channelFields(body, ["name", "attention_channel"]);
+          jsonResponse(response, 201, { channel: bridge.createChannel({ name: channelString(body, "name"), ...(body.attention_channel === undefined ? {} : { attention_channel: channelString(body, "attention_channel") }) }) });
+          return;
+        }
+        if (method === "PATCH" && parts.length === 3) {
+          channelFields(body, ["name"]);
+          jsonResponse(response, 200, { channel: bridge.renameChannel(parts[2], channelString(body, "name")) });
+          return;
+        }
+        if (method === "DELETE" && parts.length === 3) {
+          channelFields(body, ["force"]);
+          if (body.force !== undefined && typeof body.force !== "boolean") throw new BridgeError("force must be boolean", "invalid_arguments", 400);
+          jsonResponse(response, 200, { channel: bridge.deleteChannel(parts[2], { force: body.force ?? false }) });
+          return;
+        }
+      }
       if (method === "GET" && parts.join("/") === "health") {
         jsonResponse(response, 200, {
           ok: true,
@@ -558,7 +618,7 @@ export async function startDaemon(config: BridgeConfig, options: DaemonOptions =
       jsonResponse(response, 404, { error: "not_found" });
     } catch (error) {
       if (error instanceof WakeBridgeSdkError) {
-        jsonResponse(response, error.status, { error: error.message, code: error.code });
+        jsonResponse(response, error.status, { error: error.message, code: error.code, ...(error instanceof ChannelInUseError ? { usage: error.usage } : {}) });
       } else {
         jsonResponse(response, 500, { error: "Wake Bridge operation failed", code: "internal_error", error_class: operationalErrorClass(error) });
       }

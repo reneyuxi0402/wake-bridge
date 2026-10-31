@@ -29,7 +29,7 @@ export class SqliteDatabase {
   readonly path: string;
   private readonly ephemeral: boolean;
 
-  constructor(dbPath: string, options: { allowSchemaUpgrade?: boolean } = {}) {
+  constructor(dbPath: string, options: { allowSchemaUpgrade?: boolean; instanceId?: string } = {}) {
     this.ephemeral = dbPath === ":memory:";
     this.path = this.ephemeral
       ? join(tmpdir(), `wake-bridge-${randomUUID()}.sqlite`)
@@ -50,7 +50,7 @@ export class SqliteDatabase {
     if (existingVersion > 0 && existingVersion < CURRENT_SCHEMA_VERSION && options.allowSchemaUpgrade !== true) {
       throw new Error(`database schema ${existingVersion} requires explicit upgrade to ${CURRENT_SCHEMA_VERSION}; run wakebridge upgrade first`);
     }
-    if (existingVersion < CURRENT_SCHEMA_VERSION) this.configure();
+    if (existingVersion < CURRENT_SCHEMA_VERSION) this.configure(options.instanceId);
   }
 
   private userVersion(): number {
@@ -66,7 +66,7 @@ export class SqliteDatabase {
     return Number(version);
   }
 
-  private configure(): void {
+  private configure(instanceId?: string): void {
     this.exec([
       "PRAGMA journal_mode=WAL;",
       "PRAGMA synchronous=NORMAL;",
@@ -84,6 +84,7 @@ export class SqliteDatabase {
     this.migrateDeliveryCorrelations();
     this.migrateEndpointRoutes();
     this.migrateActivityWatchCondition();
+    this.migrateAttentionChannels(instanceId);
   }
 
   private migrateSourceIdentity(): void {
@@ -250,6 +251,46 @@ PRAGMA user_version=8;
 COMMIT;`);
   }
 
+  private migrateAttentionChannels(instanceId?: string): void {
+    this.exec(`
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS attention_channels (
+  instance_id TEXT NOT NULL,
+  attention_channel TEXT NOT NULL,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT,
+  PRIMARY KEY(instance_id, attention_channel)
+);
+WITH instances AS (
+  ${instanceId ? `SELECT ${sqlValue(instanceId)} AS instance_id UNION` : ""}
+  SELECT instance_id FROM events UNION SELECT instance_id FROM claims
+  UNION SELECT instance_id FROM batches UNION SELECT instance_id FROM endpoints
+  UNION SELECT instance_id FROM bindings UNION SELECT instance_id FROM presence_leases
+  UNION SELECT instance_id FROM activity_watches UNION SELECT instance_id FROM activity_observations
+  UNION SELECT instance_id FROM source_checkpoints UNION SELECT instance_id FROM source_controls
+), channels AS (
+  SELECT instance_id, attention_channel FROM claims
+  UNION SELECT instance_id, attention_channel FROM batches
+  UNION SELECT instance_id, attention_channel FROM bindings
+  UNION SELECT instance_id, attention_channel FROM presence_leases
+  UNION SELECT instance_id, attention_channel FROM activity_watches
+  UNION SELECT instance_id, attention_channel FROM activity_observations
+  UNION SELECT i.instance_id, json_extract(p.rule_json, '$.target.attention_channel')
+    FROM policies p CROSS JOIN instances i
+    WHERE json_type(p.rule_json, '$.target.attention_channel')='text'
+      AND instr(json_extract(p.rule_json, '$.target.attention_channel'), '\${')=0
+)
+INSERT OR IGNORE INTO attention_channels(instance_id, attention_channel, name, created_at, updated_at, deleted_at)
+SELECT instance_id, attention_channel, attention_channel,
+  strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'), NULL
+FROM channels WHERE attention_channel IS NOT NULL AND length(trim(attention_channel))>0;
+INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(9, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+PRAGMA user_version=9;
+COMMIT;`);
+  }
+
   exec(sql: string): void {
     const result = spawnSync("sqlite3", ["-batch", this.path], {
       input: this.withConnectionPragmas(sql),
@@ -300,7 +341,7 @@ COMMIT;`);
   }
 }
 
-export const CURRENT_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 9;
 export const MIN_SUPPORTED_SCHEMA_VERSION = 6;
 
 export function sqlValue(value: unknown): string {

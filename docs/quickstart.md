@@ -1,8 +1,12 @@
 # First Wake Quickstart
 
-状态：本指南对应 `wake-bridge@0.9.0-preview.20`；发行须通过同 tag 门禁，安装以 npm 可用版本为准，见 [验证口径](verification.md)。
+状态：当前源码为 `wake-bridge@0.9.0-preview.21` 未发布候选；npm 安装仍取得已发布 preview.20。发行须通过同 tag 门禁，见 [验证口径](verification.md)。
 
 这条路径从全新安装走到第一条可审计 wake。先选择与你的宿主匹配的接入路径，再安装和验收。
+
+多 agent、单 agent 多 channel 与 agent 自己管理 channel 的新源码路径见 [多路接入](operations/multi-agent-channels.md)。
+该增量属于未发布 preview.21，需要同一候选构建的 daemon/SDK；不要把本文单 channel 的 npm 安装步骤当作新能力已发布。
+已有 preview.20 实例从 schema 8 到 9 须先停服务、备份并显式 upgrade；旧包不能打开 schema 9，回退需升级前备份，见 [升级流程](operations/release-lifecycle.md#显式-upgrade)。
 
 ## 先选 Host 路径
 

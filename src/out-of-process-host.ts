@@ -29,7 +29,7 @@ export interface OutOfProcessHostReference {
   host_kind: string;
   tested_host_versions: string[];
   token_env: string;
-  attention_channels: string[];
+  attention_channels: string[] | "*";
   capabilities: EndpointCapabilities;
   receipt_upper_bound: Exclude<TransportReceiptUpperBound, "agent_completed">;
   timeout_ms?: number;
@@ -228,7 +228,7 @@ export function loadOutOfProcessHostFile(
   const ids = new Set<string>();
   const kinds = new Set<string>();
   const adapters: LocalHttpHostAdapter[] = [];
-  const declarations: Array<{ reference: OutOfProcessHostReference; attention_channels: string[] }> = [];
+  const declarations: Array<{ reference: OutOfProcessHostReference; attention_channels: string[] | "*" }> = [];
   for (const reference of file.adapters) {
     if (!reference || typeof reference !== "object" || Array.isArray(reference)) {
       throw new BridgeError("out-of-process host adapters entries must be objects", "invalid_host_adapter_file", 400);
@@ -240,7 +240,7 @@ export function loadOutOfProcessHostFile(
     }
     ids.add(reference.id);
     kinds.add(reference.adapter_kind);
-    const attentionChannels = boundedPrintable(reference.attention_channels, "attention_channels", true);
+    const attentionChannels = reference.attention_channels === "*" ? "*" : boundedPrintable(reference.attention_channels, "attention_channels", true);
     adapters.push(new LocalHttpHostAdapter(normalizedManifest(reference), { timeout_ms: reference.timeout_ms }));
     declarations.push({ reference, attention_channels: attentionChannels });
   }

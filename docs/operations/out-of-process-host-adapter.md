@@ -63,6 +63,10 @@ experimental tier 与错误摘要，不打印 token；缺失 env、无效 capabi
 
 ## 2. 外部 service 生命周期
 
+未发布 channel 管理源码允许 operator 将 `attention_channels` 从数组显式改为 `"*"`：授权本 Space 所有已经登记且未删除的 channel。
+Agent 先通过 `attention_channel_create` 创建，host 再登记精确 session；wildcard 不允许 host 创造未知 channel，不跨实例，
+也不给 host channel 管理权限。原来的数组范围不变，仍支持旧调用首次登记该指定 channel。详见 [多路接入](multi-agent-channels.md)。
+
 仓库外 service 从 `wake-bridge/transport` 导入 `HostSessionClient`。它在确认自己的精确 session 后启动一个 credential-free
 loopback HTTP origin，并为该进程生成独立 route token：
 
@@ -90,6 +94,16 @@ lease、旧 activity 与旧 delivery correlation 随后 fail closed。Route toke
 `HostSessionClient` 只有 open/renew/close/presence/activity/wake-echo 方法，不能 inspect、emit、配置 policy、dispatch 或执行 operator retry。
 
 ## 3. Delivery endpoint
+
+多 channel 源码扩展属于 `0.9.0-preview.21` 未发布候选，npm 基线仍为 preview.20：同 session 应通过 `openChannels` 一次登记完整集合，
+不要循环调用单 channel `open`。各 binding 有独立 generation，但共享 endpoint/token，renew/close 作用于整个 session。
+重登遗漏现有 channel 会拒绝，不覆盖共享 route。不同 agent 仍使用独立实例与凭据，
+完整示例与迁移规则见 [多 Agent / 多 Channel 接入](multi-agent-channels.md)。
+Agent 删除使用中 channel 默认得到 `409 channel_in_use` 与安全 usage；仅 agent MCP/owner HTTP 可显式 `force:true`，host token 无管理权限。
+删除不可恢复、ID 不复用，在途消息无法追回；ack/consume 得到 `channel_deleted` 后停止盲重试。
+Reference 的 presence/activity 若得到 `stale_generation` 或 `channel_deleted`，仅移除对应旧 handle 和接收 binding，
+其他路继续观察、续租和接受；迟到旧错误不清除替代 handle。全部路失效后拒绝投递、停止续租，不盲目 close 共享 endpoint。
+这不同于 `endpoint_fenced` 的整个 endpoint token 失效；两者都不会触发自动 reopen/takeover。
 
 外部 service 实现：
 
@@ -165,6 +179,9 @@ delivery nonce 确实进入相同 generation 后调用 `consumeWakeEcho()`。Cor
 `host_attested` receipt，并把对应当前 attempt 的 batch 收尾为 `seen`；这表示可信 host 已把该 wake 注入目标 session，仍不等于
 agent 理解、消费或执行了其中工作。agent 随后显式 `attention_ack` 时，Core 会在同一 `seen` batch 上补记独立的
 `agent_seen` receipt；`agent_consumed` / `agent_acted` 仍只能由 agent/harness 对具体 claim 明确记录。
+
+Activity 的 `observation_id` 在同 endpoint + generation 内唯一。多 channel 上报同一真实边沿时，分别使用带 channel 的稳定 ID；
+同 ID 重放只算重复，不会为另一 channel 更新 watch。不要因此伪造并未观察到的活动或默认向全部 channel 广播。
 
 nonce echo 可以和原 transport request 并发发生：若 host 已证明注入，但 HTTP 202 回程超时，Core 以更强的 host 证明收尾，避免
 误重投。nonce、endpoint、binding generation 与 attempt 任一不匹配都会 fail closed；不存在可由 adapter 任意指定 batch id 的 ack

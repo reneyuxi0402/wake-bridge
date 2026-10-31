@@ -152,7 +152,7 @@ describe("safe release maintenance SQLite diagnostics", () => {
     try {
       const path = join(directory, "fixture.sqlite");
       writeFileSync(path, "synthetic SQLite fixture", { mode: 0o600 });
-      if (phase === "integrity") spawn.mockReturnValueOnce(result({ stdout: '[{"user_version":8}]' }));
+      if (phase === "integrity") spawn.mockReturnValueOnce(result({ stdout: '[{"user_version":9}]' }));
       spawn.mockReturnValueOnce(result({ stdout: PRIVATE }));
       expectSafe(captured(() => databaseStatus(path)), "database_invalid_json");
     } finally { rmSync(directory, { recursive: true, force: true }); }
@@ -166,7 +166,7 @@ describe("safe release maintenance SQLite diagnostics", () => {
       backupInstance(instance.config_path, backup);
       // Backup verification succeeds; fail only the following current-DB
       // checkpoint parse, before rollback backup or database replacement.
-      spawn.mockReturnValueOnce(result({ stdout: '[{"user_version":8}]' }));
+      spawn.mockReturnValueOnce(result({ stdout: '[{"user_version":9}]' }));
       spawn.mockReturnValueOnce(result({ stdout: '[{"quick_check":"ok"}]' }));
       spawn.mockReturnValueOnce(result({ stdout: PRIVATE }));
       expectSafe(captured(() => restoreInstance({

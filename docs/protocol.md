@@ -1,12 +1,14 @@
 # 协议与数据模型
 
-状态：`0.9.0-preview.20` current public contract。Event、Claim、policy、watch、binding、Batch 与 receipt 的
+状态：`0.9.0-preview.21` 未发布源码候选；npm 发行基线仍为 preview.20。Event、Claim、policy、watch、binding、Batch 与 receipt 的
 逻辑边界有效；首版 topology 是单 Agent Space instance。policy v1 当前面见第 5、11 节；service registry/enrollment 是
 post-MVP proposal。
 
-SQLite `PRAGMA user_version=8` 是当前 release schema。版本 6/7 只能经 owner 显式 `upgrade` 进入 8；任何普通 Core
+已发布 preview.20 使用 schema 8；未发布 preview.21 候选使用 SQLite `PRAGMA user_version=9`。
+版本 6/7/8 只能经 owner 显式 `upgrade` 进入 9；任何普通 Core
 打开路径都必须返回 upgrade-required，而不是产生隐式写入。升级前 snapshot、失败恢复与 offline restore 的 operator
 contract 见 [release lifecycle](operations/release-lifecycle.md)。too-old、too-new 与 non-empty unversioned DB fail closed。
+旧包不能直接打开 schema 9；回退必须恢复升级前 verified backup，不能仅降级 package。
 
 本文件描述一个 agent-owned attention scope 的逻辑 contract。外部项目可以直接调用通用 event ingress，或通过公开
 Source Connector SDK 接入；本协议不定义邮件、群聊或小机知道自身的数据模型。Wake Bridge 只支持版本化 Host Adapter
@@ -44,6 +46,15 @@ binding 时 delivery 保持 `waiting_for_endpoint`；Bridge 不从最近 activit
 
 未来 Agent Registry、enrollment、agent credential recovery 与共享 scheduler contract 不属于本协议的首版调用面。
 
+### Channel 生命周期（preview.21 候选）
+
+Agent MCP 与 owner HTTP 提供 channel create/list/rename/delete；稳定 ID 与显示名分开，删除不可恢复、ID 不复用。
+默认 delete 遇当前 binding、启用 activity watch 或当前启用且受支持 policy 的字面 target，返回 `409 channel_in_use`，
+安全 `usage` 为 `binding: null | {endpoint_id,generation}`、`activity_watch: boolean`、`policies: [{id,version}]`。
+两入口均支持严格 boolean `force:true`，省略为 false；字符串/数字/null 无效。强制删除事务解除该路引用并终止待处理工作，
+不关闭共享 endpoint 的其他 channel，不提供 channel restore。在途/已交给宿主的消息无法追回；ack/consume 收到
+`channel_deleted` 为终态，不盲重试，也不把删除报告为已消费。完整操作见 [channel 管理](operations/multi-agent-channels.md)。
+
 ## 2. Source Connector contract
 
 ### Direct event ingress
@@ -75,6 +86,13 @@ binding 时 delivery 保持 `waiting_for_endpoint`；Bridge 不从最近 activit
 source identity 由 ingest credential 注入；agent/space 由实例配置固定。producer 不能提交或覆盖 agent、space、
 policy、attention channel 最终值、endpoint、wake prompt、system instruction 或 receipt。请求成功表示 WakeEvent 已
 可靠持久化；不表示已经匹配 policy、创建 batch 或唤醒 agent。
+
+来源 emit 的隐式目标达到 channel 额度时，仍持久化事件为 suppressed，reason 为 `channel_limit_reached`，不创建 channel/claim，
+允许 source cursor 继续；目标已删同理为 `channel_deleted`。这不改变显式 create/schedule/watch/host 注册的
+`429 channel_limit_reached`。释放额度不会自动补发，原 dedupe 重放仍 suppressed。
+Operator status 的 `ingest.channel_suppressions` 提供两原因 counts、latest_at、至多20条安全 recent 摘要；
+MCP `attention_event_list` / `attention_wake_health.events` 增加 `suppression_reason`（两原因或 null）。
+诊断基于保留历史，不含 payload，不单独改变 health/attention_required，也不产生新 incident。
 
 ### Pull connector
 
@@ -598,6 +616,12 @@ Core 不把 cold path、busy queue 或 turn-start 行为归因于产品名。写
 已有 backend agent/bridge/frontend 的宿主可以通过 public `HostSessionClient` 调用 scoped
 `/v1/host-sessions/open|renew|close|activity`。Open 固定 adapter kind、credential-scoped host kind/channel，并登记 credential-free
 loopback origin 与独立 route token；bootstrap token 与 route token 不得复用。
+
+未发布 preview.21 候选增加 `HostSessionClient.openChannels()`：同一 `/open` 接口用 `attention_channels` 非空、
+无重复列表替代 `attention_channel`，两字段不可混用；返回一个 endpoint 与 `bindings` 列表，单字段旧请求仍返回 `binding`。
+所有 channel 必须在 bootstrap credential 范围内，endpoint 与 bindings 一次事务写入。同 session 重登必须覆盖当前仍指向
+该 endpoint 的所有 channel，否则返回 `host_session_channels_required`（409）且不写入。重登统一轮换 lease token、递增各
+channel generation；renew/close 是 endpoint-wide。bootstrap renew/close 须覆盖全部绑定 channel。见 [多路接入](operations/multi-agent-channels.md)。
 
 Core dispatch 使用 `POST /v1/wakes`，body 为 `protocol_version=1 + attempt_id + delivery_nonce + WakePayload`。只有 HTTP 202
 表示 adapter 声明的 pipe/host accepted；408/425/429/5xx 为 retryable，其余为 permanent。Response body 不被读取或写入 durable

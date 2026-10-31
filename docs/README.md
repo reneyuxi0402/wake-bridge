@@ -2,6 +2,8 @@
 
 这里仅收录当前公开产品边界、使用方法和扩展契约。内部评审、具名部署记录、撤回实验和研发计划不属于公共仓库。
 
+当前源码为 `0.9.0-preview.21` 未发布候选，npm 发行基线仍为 preview.20。新 channel 能力、schema 9 与本轮 review 修复需完成候选门禁后发布，见 [验证口径](verification.md)。
+
 ## 开始使用
 
 - [First Wake Quickstart](quickstart.md)
@@ -13,6 +15,7 @@
 ## Host Adapter
 
 - [Out-of-process Host Adapter](operations/out-of-process-host-adapter.md)
+- [多 Agent / 多 Channel 接入](operations/multi-agent-channels.md)
 - [Reference Host Adapter](../examples/reference-host-adapter/README.md)
 - [Claude CLI online-session Host Adapter](../host-adapters/claude-cli/README.md)
 - [Public SDK boundary](operations/public-sdk.md)
@@ -49,3 +52,4 @@
 - [0.9.0-preview.18 release notes](releases/0.9.0-preview.18.md)
 - [0.9.0-preview.19 release notes](releases/0.9.0-preview.19.md)
 - [0.9.0-preview.20 release notes](releases/0.9.0-preview.20.md)
+- [0.9.0-preview.21 candidate release notes（尚未发布）](releases/0.9.0-preview.21.md)

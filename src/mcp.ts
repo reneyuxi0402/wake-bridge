@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { BridgeError, WakeBridge } from "./core.js";
+import { BridgeError, ChannelInUseError, WakeBridge } from "./core.js";
 import { sqlValue } from "./db.js";
 import type {
   AttentionClaim,
@@ -50,6 +50,7 @@ export interface McpServerOptions {
 }
 
 const EVENT_STATES: EventState[] = ["received", "matched", "suppressed", "batched", "consumed", "expired"];
+type ChannelSuppressionReason = "channel_deleted" | "channel_limit_reached";
 
 function isPlainObject(value: unknown): value is JsonObject {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -91,7 +92,7 @@ function compactBatch(batch: WakeBatch): JsonObject {
   };
 }
 
-function compactEvent(event: WakeEvent): JsonObject {
+function compactEvent(event: WakeEvent, suppressionReason: ChannelSuppressionReason | null): JsonObject {
   return {
     event_id: event.id,
     source: event.source,
@@ -103,7 +104,24 @@ function compactEvent(event: WakeEvent): JsonObject {
     attention_channel_hint: event.attention_channel_hint ?? null,
     matched_policy_id: event.matched_policy_id ?? null,
     matched_policy_version: event.matched_policy_version ?? null,
+    suppression_reason: suppressionReason,
   };
+}
+
+function compactEvents(bridge: WakeBridge, events: WakeEvent[]): JsonObject[] {
+  if (!events.length) return [];
+  // Hydrate only the selected page, once. Ingest suppression is distinct from
+  // channel-deletion expiry and from an intentional policy suppression.
+  const reasons = new Map(bridge.db.query<{ event_id: string; reason: ChannelSuppressionReason }>(`
+    SELECT t.event_id, t.reason FROM event_transitions t
+    JOIN events e ON e.id=t.event_id JOIN event_status s ON s.event_id=e.id
+    WHERE e.instance_id=${sqlValue(bridge.config.instance_id)}
+      AND e.id IN (${events.map((event) => sqlValue(event.id)).join(",")})
+      AND s.state='suppressed' AND t.from_state='received' AND t.to_state='suppressed'
+      AND t.reason IN ('channel_deleted','channel_limit_reached')
+    ORDER BY t.seq;
+  `).map((row) => [row.event_id, row.reason]));
+  return events.map((event) => compactEvent(event, reasons.get(event.id) ?? null));
 }
 
 function deliveryNextStep(batch: WakeBatch, agentSeen: boolean, hostAttested: boolean, ackOverdue: boolean): string {
@@ -128,6 +146,7 @@ function deliveryNextStep(batch: WakeBatch, agentSeen: boolean, hostAttested: bo
       if (hostAttested) return "The host proved session injection, not that the agent read it. After reading, the agent should call attention_ack with wake_batch_id; the adapter must not acknowledge for it.";
       return "Inspect receipts: the batch state alone does not establish agent_seen. No automatic resend is scheduled.";
     case "cancelled":
+      if (batch.last_error === "channel_deleted") return "This channel was deleted. Stop retrying and inspect the terminal state with attention_status; deletion does not mean the claims were consumed. Messages already accepted by the host cannot be recalled.";
       return "This batch will not be dispatched again. Cancellation does not recall a message already accepted by the host.";
     case "needs_attention":
       if (batch.last_error === "ack_timeout") return "No timely agent acknowledgement was recorded. Inspect receipts and real session delivery; a genuine late attention_ack may still succeed. Core does not automatically resend this batch.";
@@ -245,6 +264,26 @@ function toolDefinitions(): JsonObject[] {
   };
   return [
     {
+      name: "attention_channel_create",
+      description: "Create a named attention channel in this agent Space. The stable ID is generated unless attention_channel is supplied. Channel names need not be unique.",
+      inputSchema: { type: "object", properties: { name: { type: "string", minLength: 1, maxLength: 200 }, attention_channel: { type: "string", minLength: 1, maxLength: 200 } }, required: ["name"], additionalProperties: false },
+    },
+    {
+      name: "attention_channel_list",
+      description: "List all active channels in this agent Space and max_channels, the configured active-channel limit (not a pagination limit).",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "attention_channel_rename",
+      description: "Rename a channel without changing its stable ID, bindings, or history.",
+      inputSchema: { type: "object", properties: { attention_channel: { type: "string", minLength: 1, maxLength: 200 }, name: { type: "string", minLength: 1, maxLength: 200 } }, required: ["attention_channel", "name"], additionalProperties: false },
+    },
+    {
+      name: "attention_channel_delete",
+      description: "Delete a channel. By default, a current binding, enabled inactivity watch, or current enabled supported policy with this literal target returns channel_in_use with safe usage details. Explicit force=true allows irreversible deletion of an in-use channel: detach its session and stop pending attention work. History is retained and the ID cannot be reused. In-flight messages or messages already sent to a host cannot be recalled.",
+      inputSchema: { type: "object", properties: { attention_channel: { type: "string", minLength: 1, maxLength: 200 }, force: { type: "boolean", default: false } }, required: ["attention_channel"], additionalProperties: false },
+    },
+    {
       name: "attention_schedule",
       description: "Schedule a durable owner attention claim for a resource. eligible_after must be RFC3339 with Z or numeric offset. defer_while_presence defaults to true: while the owner is actively present on the bound channel, delivery waits instead of interrupting.",
       inputSchema: {
@@ -264,7 +303,7 @@ function toolDefinitions(): JsonObject[] {
     },
     {
       name: "attention_ack",
-      description: "Acknowledge a dispatched wake batch. Pass wake_batch_id from the Wake Bridge wake envelope.",
+      description: "Acknowledge a dispatched wake batch. Pass wake_batch_id from the Wake Bridge wake envelope. If channel_deleted is returned, stop retrying and inspect the terminal state with attention_status; deletion is not consumption and must not be reported as consumed.",
       inputSchema: {
         type: "object",
         properties: {
@@ -279,7 +318,7 @@ function toolDefinitions(): JsonObject[] {
     },
     {
       name: "attention_consume",
-      description: "Mark one attention claim consumed after it was reviewed or handled.",
+      description: "Mark one attention claim consumed after it was reviewed or handled. If channel_deleted is returned, stop retrying and inspect the terminal state with attention_status; deletion is not consumption and must not be reported as consumed.",
       inputSchema: {
         type: "object",
         properties: {
@@ -292,7 +331,7 @@ function toolDefinitions(): JsonObject[] {
     },
     {
       name: "attention_snooze",
-      description: "Defer one attention claim until a future ISO timestamp.",
+      description: "Defer one attention claim until a future ISO timestamp. If channel_deleted is returned, stop retrying and inspect the terminal state with attention_status; deletion is not consumption and must not be reported as consumed.",
       inputSchema: {
         type: "object",
         properties: {
@@ -305,7 +344,7 @@ function toolDefinitions(): JsonObject[] {
     },
     {
       name: "attention_dismiss",
-      description: "Dismiss one attention claim without changing its authoritative source. Stale claims are expected when work was handled elsewhere and are cheap to dismiss; repeated irrelevant or identity-mismatched claims can still indicate a source or policy fault.",
+      description: "Dismiss one attention claim without changing its authoritative source. Stale claims are expected when work was handled elsewhere and are cheap to dismiss; repeated irrelevant or identity-mismatched claims can still indicate a source or policy fault. If channel_deleted is returned, stop retrying and inspect the terminal state with attention_status; deletion is not consumption and must not be reported as consumed.",
       inputSchema: {
         type: "object",
         properties: {
@@ -345,7 +384,7 @@ function toolDefinitions(): JsonObject[] {
     },
     {
       name: "attention_event_list",
-      description: "List compact durable source events and their current match/consume state. Without `after`, returns the most recent `limit` events (default 100); with `after`, pages forward from that time. Results are oldest first. Provider payloads and credentials are not returned.",
+      description: "List compact durable source events and their current match/consume state. suppression_reason is channel_deleted or channel_limit_reached only for channel suppression at ingest, otherwise null; attention_channel_hint is the original hint, not proof of the resolved route. Without `after`, returns the most recent `limit` events (default 100); with `after`, pages forward from that time. Results are oldest first. Provider payloads and credentials are not returned.",
       inputSchema: {
         type: "object",
         properties: {
@@ -516,6 +555,22 @@ export class WakeBridgeMcpServer {
 
   async callTool(name: string, args: JsonObject): Promise<JsonObject> {
     switch (name) {
+      case "attention_channel_create": {
+        assertAllowed(args, ["name", "attention_channel"]);
+        return { channel: this.bridge.createChannel({ name: asString(args, "name", true, 200)!, attention_channel: asOptionalString(args, "attention_channel", 200) }) };
+      }
+      case "attention_channel_list": {
+        assertAllowed(args, []);
+        return { max_channels: this.bridge.config.max_channels, channels: this.bridge.listChannels() };
+      }
+      case "attention_channel_rename": {
+        assertAllowed(args, ["attention_channel", "name"]);
+        return { channel: this.bridge.renameChannel(asString(args, "attention_channel", true, 200)!, asString(args, "name", true, 200)!) };
+      }
+      case "attention_channel_delete": {
+        assertAllowed(args, ["attention_channel", "force"]);
+        return { channel: this.bridge.deleteChannel(asString(args, "attention_channel", true, 200)!, { force: asOptionalBoolean(args, "force") ?? false }) };
+      }
       case "attention_schedule": {
         assertAllowed(args, ["resource", "eligible_after", "attention_channel", "reason_code", "note", "idempotency_key", "defer_while_presence"]);
         const scheduled = this.bridge.scheduleClaim({
@@ -607,7 +662,7 @@ export class WakeBridgeMcpServer {
         const after = args.after === undefined ? undefined : asAbsoluteTimestamp(args, "after");
         const limit = args.limit === undefined ? undefined : asInteger(args, "limit", 1, 1000);
         // Without `after` this is "show me what is going on", so take the newest page.
-        return { events: this.bridge.listEvents({ state, source, after, limit, newest_first: after === undefined }).map(compactEvent) };
+        return { events: compactEvents(this.bridge, this.bridge.listEvents({ state, source, after, limit, newest_first: after === undefined })) };
       }
       case "attention_binding_status": {
         assertAllowed(args, ["channel"]);
@@ -721,7 +776,7 @@ export class WakeBridgeMcpServer {
           );
           const presentClaims = new Set(claims.map((claim) => claim.id));
           return {
-            delivery: deliverySummary(batch), claims: claims.map(compactClaim), events: events.map(compactEvent), attempts, receipts,
+            delivery: deliverySummary(batch), claims: claims.map(compactClaim), events: compactEvents(this.bridge, events), attempts, receipts,
             missing_claim_ids: batch.claim_ids.filter((claimId) => !presentClaims.has(claimId)),
             transitions: recentTransitions.slice(0, 100).reverse(),
             transitions_truncated: recentTransitions.length > 100,
@@ -808,7 +863,7 @@ export class WakeBridgeMcpServer {
 
   private errorValue(error: unknown): JsonObject {
     if (error instanceof BridgeError) {
-      return { error: error.code, message: error.message.slice(0, 300) };
+      return { error: error.code, message: error.message.slice(0, 300), ...(error instanceof ChannelInUseError ? { usage: error.usage } : {}) };
     }
     // Do not send stack traces, SQL, credentials, or arbitrary provider text
     // over the agent protocol. The detailed failure remains local to Core.

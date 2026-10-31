@@ -41,7 +41,7 @@ describe("release lifecycle", () => {
 
       const backupDirectory = join(current.root, "backup-before");
       const backup = backupInstance(current.config, backupDirectory);
-      expect(backup).toMatchObject({ instance_id: "release-test", source_schema_version: 8 });
+      expect(backup).toMatchObject({ instance_id: "release-test", source_schema_version: 9 });
       expect(statSync(join(backupDirectory, "wake-bridge.sqlite")).mode & 0o077).toBe(0);
 
       const after = open(current.config);
@@ -64,7 +64,7 @@ describe("release lifecycle", () => {
         rollback_output: rollbackOutput,
         confirm_instance_id: "release-test",
         confirm_offline: true,
-      })).toMatchObject({ restored: true, schema_version: 8, rollback_backup: rollbackOutput });
+      })).toMatchObject({ restored: true, schema_version: 9, rollback_backup: rollbackOutput });
 
       const restored = open(current.config);
       expect(restored.listEvents().map((event) => event.type)).toEqual(["before"]);
@@ -91,11 +91,11 @@ describe("release lifecycle", () => {
       expect(upgradeInstance(current.config, upgradeBackup, true)).toEqual({
         upgraded: true,
         from_schema: 6,
-        to_schema: 8,
+        to_schema: 9,
         backup_directory: upgradeBackup,
       });
       expect(databaseStatus(join(upgradeBackup, "wake-bridge.sqlite"))).toMatchObject({ schema_version: 6, integrity: "ok" });
-      expect(databaseStatus(config.db_path)).toMatchObject({ schema_version: 8, integrity: "ok" });
+      expect(databaseStatus(config.db_path)).toMatchObject({ schema_version: 9, integrity: "ok" });
 
       restoreInstance({
         config_path: current.config,
