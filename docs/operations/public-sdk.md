@@ -1,6 +1,6 @@
 # Public SDK boundary
 
-状态：introduced in `wake-bridge@0.9.0-preview.2`; current source candidate `0.9.0-preview.21`（尚未发布），npm 基线仍为 preview.20。
+状态：introduced in `wake-bridge@0.9.0-preview.2`; current contract `0.9.0-preview.21`，实际发行以同 tag 门禁与产物为准。
 
 Wake Bridge 只把 event、source 与 transport 三条版本化 contract 作为第三方 package surface。Core、DB、daemon、owner
 control 与 release lifecycle 是 package 内部实现，不是可导入 subpath；历史具体产品 Host Adapter 实验也不进入当前 tarball。`exports` map 会拒绝
@@ -11,7 +11,7 @@ bridge service 可以通过固定 loopback wire contract 接入 stock daemon。P
 presence 与 activity capability，
 不暴露 Core、DB 或 owner control；内置 local HTTP transport 仍是 package private implementation。
 
-未发布 preview.21 候选新增 `openChannels()` / `leases()`；必须使用同一候选构建的 daemon 和 SDK，不能对旧安装直接调用。
+preview.21 新增 `openChannels()` / `leases()`；必须使用同版本 daemon 和 SDK，不能对旧安装直接调用。
 多个 channel 的 handle 共用 endpoint/token，generation 各自独立；续租/关闭仍是 endpoint 级。Agent 的 channel
 create/list/rename/delete 走 owner MCP/HTTP，不扩充 host token 的管理权限，见 [多路与动态 channel](multi-agent-channels.md)。
 实例配置可显式为 host 授权 `attention_channels: "*"`，仅覆盖本 Space 已登记的有效 channel；旧数组白名单保持不变。

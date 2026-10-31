@@ -4,7 +4,8 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { performance } from "node:perf_hooks";
+import { describe, expect, it, vi } from "vitest";
 import { WakeBridge } from "../src/core.js";
 import { startDaemon } from "../src/daemon.js";
 import { LocalHttpHostAdapter } from "../src/out-of-process-host.js";
@@ -83,6 +84,26 @@ async function dispatch(agent: AgentAddress) {
   const response = await http(agent, "/v1/dispatch", {});
   expect(response.status).toBe(200);
   return response.body.results as { batch_id: string; status: string }[];
+}
+
+async function dispatchExpected(agent: AgentAddress, expectedStatuses: string[]) {
+  const results: Awaited<ReturnType<typeof dispatch>> = [];
+  // A bounded sweep guarantees one candidate can progress, not that all due
+  // work fits in a pass. Never silently retry a failed or repeated batch.
+  for (let pass = 0; pass < expectedStatuses.length && results.length < expectedStatuses.length; pass += 1) {
+    const current = await dispatch(agent);
+    expect(current.length, "Expected initial due work to progress in this bounded pass").toBeGreaterThan(0);
+    for (const result of current) {
+      expect(expectedStatuses).toContain(result.status);
+      expect(result.batch_id).toEqual(expect.any(String));
+    }
+    results.push(...current);
+    expect(results.length).toBeLessThanOrEqual(expectedStatuses.length);
+    expect(new Set(results.map((result) => result.batch_id)).size).toBe(results.length);
+  }
+  expect(results).toHaveLength(expectedStatuses.length);
+  expect(results.map((result) => result.status).sort()).toEqual([...expectedStatuses].sort());
+  return results;
 }
 
 async function inspect(agent: AgentAddress) {
@@ -243,7 +264,17 @@ describe("two independent agent spaces over real loopback HTTP", () => {
       }
     }
     for (const { agent, hosts, leases } of sessions) {
-      expect((await dispatch(agent)).map((result) => result.status)).toEqual(["accepted", "accepted"]);
+      // Force this topology across bounded passes without changing the real
+      // HTTP transport or the business clock used for leases and receipts.
+      let monotonicRead = 0;
+      const budgetClock = topology === "split-sessions"
+        ? vi.spyOn(performance, "now").mockImplementation(() => monotonicRead++ * 1_000)
+        : undefined;
+      try {
+        expect((await dispatchExpected(agent, ["accepted", "accepted"])).map((result) => result.status)).toEqual(["accepted", "accepted"]);
+      } finally {
+        budgetClock?.mockRestore();
+      }
       const deliveries = hosts.flatMap((host) => host.deliveries);
       expect(deliveries).toHaveLength(2);
       expect(deliveries.map((delivery) => delivery.wake.attention_channel).sort()).toEqual([...CHANNELS]);
@@ -297,7 +328,7 @@ describe("two independent agent spaces over real loopback HTTP", () => {
     for (const opened of [openedA, openedB]) expect(opened.leases.life.generation).toBe(opened.leases.work.generation);
     for (const agent of [a, b]) {
       for (const channel of CHANNELS) await emit(agent, channel, `same-dedupe-${channel}`);
-      await dispatch(agent);
+      await dispatchExpected(agent, ["accepted", "accepted"]);
     }
     const before = await Promise.all([inspect(a), inspect(b)]);
     for (const [target, other, host, opened, foreign] of [
@@ -337,7 +368,7 @@ describe("two independent agent spaces over real loopback HTTP", () => {
     const old = await openShared(a, original);
     const openedB = await openShared(b, hostB);
     for (const channel of CHANNELS) await emit(a, channel, `before-rotation-${channel}`);
-    await dispatch(a);
+    await dispatchExpected(a, ["accepted", "accepted"]);
     const beforePartial = await inspect(a);
     await expect(a.client.open({ session_ref: "same-session-ref", attention_channel: "life", route_origin: refreshed.origin, route_token: refreshed.token })).rejects.toMatchObject({ status: 409 });
     await expect(a.client.openChannels({ session_ref: "same-session-ref", attention_channels: ["life"], route_origin: refreshed.origin, route_token: refreshed.token })).rejects.toMatchObject({ status: 409 });
@@ -356,7 +387,7 @@ describe("two independent agent spaces over real loopback HTTP", () => {
     }
     expect(await inspect(a)).toEqual(afterRotation);
     for (const channel of CHANNELS) await emit(a, channel, `before-takeover-${channel}`);
-    await dispatch(a);
+    await dispatchExpected(a, ["accepted", "accepted"]);
     const replacement = a.client.lease(await a.client.open({
       session_ref: "new-life-session", attention_channel: "life", route_origin: lifeHost.origin, route_token: lifeHost.token,
     }));
@@ -375,8 +406,8 @@ describe("two independent agent spaces over real loopback HTTP", () => {
       await emit(a, channel, `after-life-close-${channel}`);
       await emit(b, channel, `after-life-close-${channel}`);
     }
-    expect((await dispatch(a)).map((result) => result.status).sort()).toEqual(["accepted", "waiting_for_endpoint"]);
-    expect((await dispatch(b)).map((result) => result.status)).toEqual(["accepted", "accepted"]);
+    expect((await dispatchExpected(a, ["accepted", "waiting_for_endpoint"])).map((result) => result.status).sort()).toEqual(["accepted", "waiting_for_endpoint"]);
+    expect((await dispatchExpected(b, ["accepted", "accepted"])).map((result) => result.status)).toEqual(["accepted", "accepted"]);
     expect(original.deliveries).toHaveLength(2);
     expect(refreshed.deliveries.map((value) => value.wake.attention_channel)).toEqual(["life", "work", "work"]);
     expect(lifeHost.deliveries).toHaveLength(1);
@@ -401,7 +432,7 @@ describe("two independent agent spaces over real loopback HTTP", () => {
     if (gate === "presence") await a.client.renewPresence(openedA.leases.life, { observed_by: "fixture-owner-edge", ttl_ms: 60_000 });
     for (const agent of [a, b]) for (const channel of CHANNELS) await emit(agent, channel, `gate-${channel}`);
     expect((await dispatch(a)).map((result) => result.status)).toEqual(["accepted"]);
-    expect((await dispatch(b)).map((result) => result.status)).toEqual(["accepted", "accepted"]);
+    expect((await dispatchExpected(b, ["accepted", "accepted"])).map((result) => result.status)).toEqual(["accepted", "accepted"]);
     expect(hostA.deliveries.map((value) => value.wake.attention_channel)).toEqual(["work"]);
     expect(hostB.deliveries.map((value) => value.wake.attention_channel).sort()).toEqual([...CHANNELS]);
     const gated = await inspect(a);
@@ -424,7 +455,7 @@ describe("two independent agent spaces over real loopback HTTP", () => {
     await Promise.all([openShared(a, hostA), openShared(b, hostB)]);
     hostA.timeouts.add("life");
     for (const agent of [a, b]) for (const channel of CHANNELS) await emit(agent, channel, `timeout-${channel}`);
-    const [resultA, resultB] = await Promise.all([dispatch(a), dispatch(b)]);
+    const [resultA, resultB] = await Promise.all([dispatch(a), dispatchExpected(b, ["accepted", "accepted"])]);
     expect(resultA.map((result) => result.status)).toContain("retry_wait");
     expect(resultB.map((result) => result.status)).toEqual(["accepted", "accepted"]);
     expect((await http(b, "/health")).status).toBe(200);
@@ -433,8 +464,11 @@ describe("two independent agent spaces over real loopback HTTP", () => {
     hostA.timeouts.clear();
     // A transport timeout may use up the dispatcher's bounded sweep. Resume
     // through its normal next pass instead of asserting an artificial SLA.
-    const resumed = await dispatch(a);
-    expect([...resultA, ...resumed].filter((result) => result.status === "accepted")).toHaveLength(2);
+    const missingAccepted = 2 - resultA.filter((result) => result.status === "accepted").length;
+    const resumed = await dispatchExpected(a, Array.from({ length: missingAccepted }, () => "accepted"));
+    const accepted = [...resultA, ...resumed].filter((result) => result.status === "accepted");
+    expect(accepted).toHaveLength(2);
+    expect(new Set(accepted.map((result) => result.batch_id)).size).toBe(2);
     const lifeDeliveries = hostA.deliveries.filter((delivery) => delivery.wake.attention_channel === "life");
     expect(lifeDeliveries).toHaveLength(2);
     expect(lifeDeliveries[1].wake.wake_batch_id).toBe(timedOut.wake.wake_batch_id);
@@ -464,13 +498,13 @@ describe("two independent agent spaces over real loopback HTTP", () => {
     const pending = await inspect(a);
     expect(pending.batches.map((batch: { state: string }) => batch.state)).toEqual(["pending", "pending"]);
     for (const channel of CHANNELS) await emit(b, channel, `before-a-crash-${channel}`);
-    await dispatch(b);
+    await dispatchExpected(b, ["accepted", "accepted"]);
     const pidB = b.child.pid;
     await a.stop("SIGKILL");
     expect(a.child.signalCode).toBe("SIGKILL");
     expect((await http(b, "/health")).body).toMatchObject({ ok: true, instance_id: b.config.instance_id });
     for (const channel of CHANNELS) await emit(b, channel, `while-a-down-${channel}`);
-    expect((await dispatch(b)).map((result) => result.status)).toEqual(["accepted", "accepted"]);
+    expect((await dispatchExpected(b, ["accepted", "accepted"])).map((result) => result.status)).toEqual(["accepted", "accepted"]);
     expect(hostA.deliveries).toHaveLength(0);
     expect(hostB.deliveries).toHaveLength(4);
     const restarted = await lab.process("a");
@@ -478,7 +512,7 @@ describe("two independent agent spaces over real loopback HTTP", () => {
     expect((await inspect(restarted)).events.map((event: { id: string }) => event.id)).toEqual(pending.events.map((event: { id: string }) => event.id));
     const reopened = await openShared(restarted, hostA);
     for (const channel of CHANNELS) expect(reopened.leases[channel].generation).toBe(oldA.leases[channel].generation + 1);
-    expect((await dispatch(restarted)).map((result) => result.status)).toEqual(["accepted", "accepted"]);
+    expect((await dispatchExpected(restarted, ["accepted", "accepted"])).map((result) => result.status)).toEqual(["accepted", "accepted"]);
     expect(hostA.deliveries).toHaveLength(2);
     expect(hostA.deliveries.flatMap((delivery) => delivery.wake.claim_refs.map((claim) => claim.claim_id)).sort()).toEqual(pending.claims.map((claim: { id: string }) => claim.id).sort());
     expect(hostA.deliveries.every((delivery) => delivery.wake.instance_id === a.config.instance_id)).toBe(true);

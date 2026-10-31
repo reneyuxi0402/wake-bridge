@@ -63,7 +63,7 @@ experimental tier 与错误摘要，不打印 token；缺失 env、无效 capabi
 
 ## 2. 外部 service 生命周期
 
-未发布 channel 管理源码允许 operator 将 `attention_channels` 从数组显式改为 `"*"`：授权本 Space 所有已经登记且未删除的 channel。
+preview.21 允许 operator 将 `attention_channels` 从数组显式改为 `"*"`：授权本 Space 所有已经登记且未删除的 channel。
 Agent 先通过 `attention_channel_create` 创建，host 再登记精确 session；wildcard 不允许 host 创造未知 channel，不跨实例，
 也不给 host channel 管理权限。原来的数组范围不变，仍支持旧调用首次登记该指定 channel。详见 [多路接入](multi-agent-channels.md)。
 
@@ -95,7 +95,7 @@ lease、旧 activity 与旧 delivery correlation 随后 fail closed。Route toke
 
 ## 3. Delivery endpoint
 
-多 channel 源码扩展属于 `0.9.0-preview.21` 未发布候选，npm 基线仍为 preview.20：同 session 应通过 `openChannels` 一次登记完整集合，
+多 channel 扩展自 `0.9.0-preview.21` 提供，实际发行以同 tag 门禁与产物为准：同 session 应通过 `openChannels` 一次登记完整集合，
 不要循环调用单 channel `open`。各 binding 有独立 generation，但共享 endpoint/token，renew/close 作用于整个 session。
 重登遗漏现有 channel 会拒绝，不覆盖共享 route。不同 agent 仍使用独立实例与凭据，
 完整示例与迁移规则见 [多 Agent / 多 Channel 接入](multi-agent-channels.md)。

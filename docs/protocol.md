@@ -1,10 +1,10 @@
 # 协议与数据模型
 
-状态：`0.9.0-preview.21` 未发布源码候选；npm 发行基线仍为 preview.20。Event、Claim、policy、watch、binding、Batch 与 receipt 的
+状态：`0.9.0-preview.21` public contract；实际发行以同 tag 门禁与产物为准。Event、Claim、policy、watch、binding、Batch 与 receipt 的
 逻辑边界有效；首版 topology 是单 Agent Space instance。policy v1 当前面见第 5、11 节；service registry/enrollment 是
 post-MVP proposal。
 
-已发布 preview.20 使用 schema 8；未发布 preview.21 候选使用 SQLite `PRAGMA user_version=9`。
+preview.20 使用 schema 8；preview.21 使用 SQLite `PRAGMA user_version=9`。
 版本 6/7/8 只能经 owner 显式 `upgrade` 进入 9；任何普通 Core
 打开路径都必须返回 upgrade-required，而不是产生隐式写入。升级前 snapshot、失败恢复与 offline restore 的 operator
 contract 见 [release lifecycle](operations/release-lifecycle.md)。too-old、too-new 与 non-empty unversioned DB fail closed。
@@ -46,7 +46,7 @@ binding 时 delivery 保持 `waiting_for_endpoint`；Bridge 不从最近 activit
 
 未来 Agent Registry、enrollment、agent credential recovery 与共享 scheduler contract 不属于本协议的首版调用面。
 
-### Channel 生命周期（preview.21 候选）
+### Channel 生命周期（preview.21）
 
 Agent MCP 与 owner HTTP 提供 channel create/list/rename/delete；稳定 ID 与显示名分开，删除不可恢复、ID 不复用。
 默认 delete 遇当前 binding、启用 activity watch 或当前启用且受支持 policy 的字面 target，返回 `409 channel_in_use`，
@@ -617,7 +617,7 @@ Core 不把 cold path、busy queue 或 turn-start 行为归因于产品名。写
 `/v1/host-sessions/open|renew|close|activity`。Open 固定 adapter kind、credential-scoped host kind/channel，并登记 credential-free
 loopback origin 与独立 route token；bootstrap token 与 route token 不得复用。
 
-未发布 preview.21 候选增加 `HostSessionClient.openChannels()`：同一 `/open` 接口用 `attention_channels` 非空、
+preview.21 增加 `HostSessionClient.openChannels()`：同一 `/open` 接口用 `attention_channels` 非空、
 无重复列表替代 `attention_channel`，两字段不可混用；返回一个 endpoint 与 `bindings` 列表，单字段旧请求仍返回 `binding`。
 所有 channel 必须在 bootstrap credential 范围内，endpoint 与 bindings 一次事务写入。同 session 重登必须覆盖当前仍指向
 该 endpoint 的所有 channel，否则返回 `host_session_channels_required`（409）且不写入。重登统一轮换 lease token、递增各

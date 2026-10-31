@@ -1,6 +1,6 @@
 # 架构与路由
 
-状态：`0.9.0-preview.21` 未发布源码候选；npm 基线仍为 preview.20。首版 deployment topology 为单 Agent Space
+状态：`0.9.0-preview.21` public contract；实际发行以同 tag 门禁与产物为准。首版 deployment topology 为单 Agent Space
 instance；共享 service 多 Space 已延后为 post-MVP proposal。
 
 ## 1. 系统边界
@@ -154,7 +154,7 @@ busy behavior 不进入 public policy v1，也不能经 Core install/config 绕�
 
 ### Release / schema lifecycle
 
-schema 8 是已发布 preview.20 package baseline；未发布 preview.21 候选使用 schema 9，6 是最低显式升级版本。
+schema 8 是 preview.20 package baseline；preview.21 使用 schema 9，6 是最低显式升级版本。
 schema 9 增加 channel 的稳定 ID、显示名和删除标记，旧引用经显式升级回填；删除不销毁审计历史，也不复用旧 ID。
 新 DB 只由 `init` bootstrap；普通 daemon、CLI、MCP 与 Core
 打开旧 schema 时 fail closed，不拥有 migration authority。`wakebridge upgrade` 先创建并验证一致性 SQLite snapshot，
@@ -243,7 +243,7 @@ Inactivity Watch 是 agent 显式登记的调度条件，不是 Bridge 自动推
 - 未 register 或不再匹配 binding generation 的 caller，除 status/inspect 外不能创建或改变 endpoint-scoped state；
 - binding key 为 attention channel；
 - 多个 channel 可以显式指向同一 endpoint；
-- 未发布 preview.21 候选通过 `openChannels` 一次登记共享 session 的完整 channel 集合，endpoint/token 共享，
+- preview.21 通过 `openChannels` 一次登记共享 session 的完整 channel 集合，endpoint/token 共享，
   binding generation 仍逐 channel；重登与 close 的影响范围见 [多路接入](operations/multi-agent-channels.md)；
 - takeover 使用 compare-and-swap 并递增 generation；
 - 不根据 process name、last_active 或“最近窗口”自动接管；

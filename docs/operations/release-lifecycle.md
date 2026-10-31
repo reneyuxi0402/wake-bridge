@@ -1,6 +1,6 @@
 # Release install, upgrade, backup, and rollback
 
-状态：`0.9.0-preview.21` 未发布候选 runbook，npm 基线仍为 preview.20；本地验收与发布门禁分开记录，见 [验证口径](../verification.md)。Wake Bridge 发布包只支持 Host Adapter Contract；
+状态：`0.9.0-preview.21` runbook；本地验收与同 tag 发布门禁分开记录，实际发行以产物为准，见 [验证口径](../verification.md)。Wake Bridge 发布包只支持 Host Adapter Contract；
 完成本页不等于任何具体 agent 产品获得兼容性或时延保证。
 
 ## 支持矩阵
@@ -14,7 +14,7 @@
 | Node.js | 20 或更高 |
 | SQLite CLI | 3.35.0 或更高，必须支持 `-json` 输出与 JSON1 函数（`json_each`） |
 | topology | 每个 Agent Space 一个本地 instance / SQLite DB |
-| schema | 已发布 preview.20 为 8；未发布 preview.21 候选为 9，显式升级支持 6、7、8 → 9 |
+| schema | preview.20 为 8；preview.21 为 9，显式升级支持 6、7、8 → 9 |
 | host integration | out-of-process Host Adapter Contract v1；捆绑实验性 Claude CLI online adapter，不代表通用产品支持 |
 
 自 `0.9.0-preview.9` 起，npm manifest 允许 macOS 与 Linux，并按平台生成 LaunchAgent 或 systemd user unit。Linux 实机证据来自

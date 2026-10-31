@@ -1,6 +1,6 @@
 # 多 Agent 与单 Agent 多 Channel
 
-状态：本页描述 `0.9.0-preview.21` 未发布候选的 `openChannels`、channel 管理与 schema 9；npm 基线仍为 preview.20。不要直接对已安装的 preview.20 调用新方法。
+状态：本页描述 `0.9.0-preview.21` 的 `openChannels`、channel 管理与 schema 9；实际发行以同 tag 门禁与产物为准。不要直接对已安装的 preview.20 调用新方法。
 部署仍是每个 Agent Space 一个 daemon/SQLite；不提供共享多租户服务，也不承诺具体宿主已经完成多 agent 接入。
 
 ## 集成方向与产品责任

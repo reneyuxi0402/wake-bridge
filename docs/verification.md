@@ -2,8 +2,8 @@
 
 ## 发行基线与源码增量
 
-当前源码候选为 `0.9.0-preview.21`，尚未发布，见 [候选 release notes](releases/0.9.0-preview.21.md)。
-npm 发行基线仍为 `0.9.0-preview.20`；以下保留其 [release notes](releases/0.9.0-preview.20.md) 与历史源码验收证据。
+本版为 `0.9.0-preview.21`，见 [release notes](releases/0.9.0-preview.21.md)。实际发行以同 tag 门禁与可下载产物为准。
+以下保留 preview.20 的 [release notes](releases/0.9.0-preview.20.md) 与历史源码验收证据。
 发布准备前源码提交 `c281df19469e03b18826a9259b671e789049d7dd` 的本地完整回归为 488 项 Vitest + 17 项 Node，共 505 项；
 [同提交 CI](https://github.com/reneyuxi0402/wake-bridge/actions/runs/40284178626) 四组首轮全部通过。
 这些是源码验收，不代替 preview.20 自身 tag 的发布门禁；该 tag 的四组全部通过后，工作流才发布 npm `latest` 与 GitHub prerelease。
@@ -22,12 +22,19 @@ Operator `ingest.channel_suppressions` 与 MCP 紧凑事件 `suppression_reason`
 2026-10-30（America/Los_Angeles）本轮 macOS arm64 / Node 20.20.1 完整回归：46文件603项 Vitest +17项 Node，共620项全部通过。
 typecheck、build、仓外 tarball 安装通过；监督器退出0，无超时、观察失败、退出后泄漏或自有进程残留，原30秒测试门限未改。
 H1/H2/API/reference 定向反例先红后绿；下方590项是修复前历史，不冒充此轮结果。
-本轮同 tag 的 macOS/Ubuntu × Node 20/24 四组发布门禁尚未执行，main CI 与发布状态也须分别核对，不据本地结果推断已经发布。
-候选仍为每 agent 一个 Space/daemon/DB，Claude adapter 仍单路；不新增其他具体宿主接入、真实模型或新平台 UAT 声明。
+已验证候选提交为 `53f67bf2688e2c0ee2678a856e92f04b88ffd81d`；[main CI 41171211249](https://github.com/reneyuxi0402/wake-bridge/actions/runs/41171211249)
+attempt 1 的 macOS/Ubuntu × Node 20/24 四组全部通过。这些本地与 main 证据不能代替新 tag commit 的四组发布门禁，
+也不能据此推断 npm 已发布；发行仍须核对同 tag 工作流与实际产物。
+本版仍为每 agent 一个 Space/daemon/DB，Claude adapter 仍单路；不新增其他具体宿主接入、真实模型或新平台 UAT 声明。
 
-### 多 Agent / 多 Channel 源码增量（尚未发布）
+2026-10-31 发布复验首轮603项 Vitest 中602通过，split-session 集成断言把一轮 dispatch 误当成清空全部工作而失败；后续17项 Node 未执行。
+既有1秒软预算允许剩余 batch 留到下轮。确定性预算反例复现相同失败后，测试改为至多 N 轮收集 N 项，严格检查状态、数量与 batch 唯一性；
+单文件8项及修正后本地完整620项（603 Vitest +17 Node）通过，监督器退出0且无自有进程残留；生产代码与原超时门限未改。
+原失败记录保留，不称首轮全绿；同 tag 四组门禁仍独立执行。
 
-未发布 preview.21 源码增加 `openChannels` / `leases`，支持一个真实 session 原子登记完整 channel 集合。
+### 多 Agent / 多 Channel（preview.21）
+
+preview.21 增加 `openChannels` / `leases`，支持一个真实 session 原子登记完整 channel 集合。
 旧单 channel 响应保持兼容；共享 endpoint 的重登、续租、关闭范围明确，遗漏现有 channel 的重登会拒绝。
 这不是共享多租户服务，仍为每个 Agent Space 独立 daemon、SQLite 和凭据。操作见 [多路接入](operations/multi-agent-channels.md)。
 
@@ -48,7 +55,7 @@ H1/H2/API/reference 定向反例先红后绿；下方590项是修复前历史，
 typecheck、build、仓外安装检查通过。首轮既有 1105-claim 积压/重启用例超过原 30 秒门限（34.276 秒），其余 532 项通过；
 未改代码或门限，单跑 4.573 秒、完整复验中 3.780 秒通过。耗时波动原因未确认，不把复验通过写成首轮全绿或根因已修复。
 
-### Agent 自主管理 Channel 源码增量（尚未发布）
+### Agent 自主管理 Channel（preview.21）
 
 在上述多路基础上，新增公开 MCP / owner HTTP 的 channel 创建、列出、显示名修改和删除。
 稳定 ID 与显示名分开；有效 channel 默认上限32、由实例配置调整；每条 channel 仍最多绑定一个 session。
@@ -67,7 +74,7 @@ typecheck、build、仓外安装检查通过。首轮既有 1105-claim 积压/�
 所有上述消费与回执均为合成 fixture，不新增真实模型、第三方宿主或多日运行保证。
 
 2026-10-30 本轮 review 修复前的历史本地 macOS arm64 / Node 20.20.1 回归：46 文件、573 项 Vitest + 17 项 Node，共590项通过，
-typecheck、build、仓外安装与进程清理观察通过。仍是未发布源码，不是 npm preview.20 的能力或新跨平台 CI 结论。
+typecheck、build、仓外安装与进程清理观察通过。当时仍是未发布源码，不是 npm preview.20 的能力或新跨平台 CI 结论。
 早期全量曾受 loopback/进程观察的 sandbox EPERM 阻止，且暴露上述并发测试接缝失效；均保留失败记录，不称首轮全绿。
 
 ### preview.19 历史发行基线

@@ -1,6 +1,6 @@
 # Linux VPS deployment
 
-状态：当前源码为 `wake-bridge@0.9.0-preview.21` 未发布候选，npm 基线仍为 preview.20；本轮不新增 Linux 实机验收。service 与 release lifecycle 支持自 `0.9.0-preview.9` 起提供，preview.18 修复路径处理与配置传递。Ubuntu 22.04 LTS x64 /
+状态：本指南对应 `wake-bridge@0.9.0-preview.21`，实际发行以同 tag 门禁与产物为准；本轮不新增 Linux 实机验收。service 与 release lifecycle 支持自 `0.9.0-preview.9` 起提供，preview.18 修复路径处理与配置传递。Ubuntu 22.04 LTS x64 /
 systemd 249 在 `0.9.0-preview.9` 上完成了真实 VPS 连续两轮 reboot canary；Ubuntu 24.04 x64 已在 CI 验证，但尚无独立真实 VPS 证据。Linux arm64、容器、WSL、NAS 与无 systemd 环境不在
 已验证矩阵。
 
@@ -163,7 +163,7 @@ systemctl --user daemon-reload
 ```
 
 `service uninstall` 只删除 unit，保留 config、SQLite 与 backup。package 回滚前先执行 `wakebridge backup`。
-preview.21 候选使用 schema 9，preview.20 使用 schema 8；升级必须先停服务并通过 [显式 upgrade](release-lifecycle.md#显式-upgrade)
+preview.21 使用 schema 9，preview.20 使用 schema 8；升级必须先停服务并通过 [显式 upgrade](release-lifecycle.md#显式-upgrade)
 创建 verified backup。回退 preview.20 不能只安装旧 tarball，必须离线恢复升级前兼容 schema 的 verified backup，再安装匹配旧包并运行
 `release-preflight/doctor` 核对。恢复会回到备份时刻，不承诺保留升级后的新工作。preview.8 的 npm
 manifest 会拒绝 Linux 安装，这属于预期的 fail-closed 回滚边界，不代表数据损坏。

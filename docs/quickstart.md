@@ -1,11 +1,11 @@
 # First Wake Quickstart
 
-状态：当前源码为 `wake-bridge@0.9.0-preview.21` 未发布候选；npm 安装仍取得已发布 preview.20。发行须通过同 tag 门禁，见 [验证口径](verification.md)。
+状态：本指南对应 `wake-bridge@0.9.0-preview.21`；发行须通过同 tag 门禁，安装以实际可下载版本为准，见 [验证口径](verification.md)。
 
 这条路径从全新安装走到第一条可审计 wake。先选择与你的宿主匹配的接入路径，再安装和验收。
 
 多 agent、单 agent 多 channel 与 agent 自己管理 channel 的新源码路径见 [多路接入](operations/multi-agent-channels.md)。
-该增量属于未发布 preview.21，需要同一候选构建的 daemon/SDK；不要把本文单 channel 的 npm 安装步骤当作新能力已发布。
+该增量自 preview.21 提供，需要同版本 daemon/SDK；preview.20 不具备这些新能力。
 已有 preview.20 实例从 schema 8 到 9 须先停服务、备份并显式 upgrade；旧包不能打开 schema 9，回退需升级前备份，见 [升级流程](operations/release-lifecycle.md#显式-upgrade)。
 
 ## 先选 Host 路径
@@ -25,7 +25,7 @@
 
 ## 1. 安装并创建 Agent Space
 
-`0.9.0-preview.20` 支持 macOS arm64/x64，以及带 systemd user service 的 Linux x64；需要 Node.js 20+ 和带 JSON1 的 SQLite CLI
+`0.9.0-preview.21` 支持 macOS arm64/x64，以及带 systemd user service 的 Linux x64；需要 Node.js 20+ 和带 JSON1 的 SQLite CLI
 3.35+（还需支持 `RETURNING`）。Linux 实机验证环境为 Ubuntu 22.04 LTS x64，Ubuntu 24.04 x64 当前只有 CI 证据；其他 Linux 环境先按
 [Linux VPS runbook](operations/linux-vps.md) 执行 preflight 与本机 canary：
 

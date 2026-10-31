@@ -1,6 +1,6 @@
 # Operator status and dead-letter recovery
 
-状态：introduced in `wake-bridge@0.9.0-preview.3`; current source candidate `0.9.0-preview.21`（尚未发布），npm 基线仍为 preview.20。
+状态：introduced in `wake-bridge@0.9.0-preview.3`; current contract `0.9.0-preview.21`，实际发行以同 tag 门禁与产物为准。
 
 这组命令面向单 Agent Space 的 operator，不属于第三方 SDK，也不进入 agent MCP。它只补运行态定位与永久投递失败的受控
 恢复，不替 agent 判断来源工作是否仍需处理。
@@ -42,7 +42,7 @@ credential 不能调用该 endpoint。
 address、lease token、session ref、provider error message、source credential 或 owner token。它只保留安全的 error class；详细 provider
 错误仍留在本地 DB/operator evidence 中，不进入结构化 health payload。
 
-### Channel ingest 抑制（preview.21 候选）
+### Channel ingest 抑制（preview.21）
 
 离线 `status` 与 live `/v1/status` 均提供 `ingest.channel_suppressions`：
 

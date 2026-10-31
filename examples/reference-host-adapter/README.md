@@ -35,7 +35,7 @@ route token 必须是两个不同的、至少 32 字符的随机值；不要写�
 `wake-bridge` package 目录（本地安装例如 `/absolute/path/to/node_modules/wake-bridge`；全局安装可用
 `cd "$(npm root --global)/wake-bridge"`），不能直接在任意项目目录运行这个相对路径。
 
-多 channel 是尚未发布的新源码能力，需使用同一 checkout 构建的 daemon、SDK 与本例；已发布的
+多 channel 自 `0.9.0-preview.21` 提供，需使用同版本 daemon、SDK 与本例；实际发行以同 tag 门禁与产物为准。旧版
 `0.9.0-preview.20` 只有旧单 channel 能力，不支持 `attentionChannels` / `WAKEBRIDGE_ATTENTION_CHANNELS`。
 
 Reference adapter 默认监听 `127.0.0.1:4393`；该端口已占用时会报 `EADDRINUSE`。下面显式使用

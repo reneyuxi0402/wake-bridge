@@ -25,8 +25,8 @@ Wake Bridge 是一个 local-first 的 **agent attention scheduler and delivery c
 
 从 [First Wake Quickstart](docs/quickstart.md) 开始。它覆盖 clean install、Agent Space 初始化、仓库外 Host Adapter、第一条受控 wake、MCP、presence、self-commitment 与可选 Source Connector。完整公共文档见 [在线文档导航](https://github.com/reneyuxi0402/wake-bridge/blob/main/docs/README.md)（npm 包只附带运行所需文档）。
 
-当前源码候选为 `0.9.0-preview.21`，尚未发布，见 [候选 release notes](docs/releases/0.9.0-preview.21.md)。npm 已发布基线仍为 `0.9.0-preview.20`。
-候选增加多 channel 登记、agent channel 管理及安全删除/来源抑制诊断；本地完整620项与仓外安装通过，不表示具体宿主或真实模型已验收。
+本版为 `0.9.0-preview.21`，见 [release notes](docs/releases/0.9.0-preview.21.md)。实际发行状态以同 tag 门禁与可下载产物为准。
+本版增加多 channel 登记、agent channel 管理及安全删除/来源抑制诊断；本地完整620项与仓外安装通过，不表示具体宿主或真实模型已验收。
 版本须经同 tag 四组门禁后发布到 npm `latest`；
 已发布 tarball/tag 不改写，源码与发行证据的区别见 [公开验证口径](docs/verification.md)。包内置可选的 Claude CLI 在线会话 Host Adapter
 与 Gmail Source Connector；已在
@@ -134,7 +134,7 @@ Source Connector 的本地协议、身份 fencing、cursor CAS 与错误处理�
 
 ## Preview 安装
 
-当前 package 名称为 `wake-bridge`，正式发行后使用 npm 的 `latest` dist-tag；源码候选 `0.9.0-preview.21` 尚不可从 npm 安装。已发布 `0.9.0-preview.20` 的支持范围仍为 macOS arm64/x64，以及带 systemd
+当前 package 名称为 `wake-bridge`，发行使用 npm 的 `latest` dist-tag；可用 `npm view wake-bridge version` 查询实际发行版本。`0.9.0-preview.21` 的支持范围仍为 macOS arm64/x64，以及带 systemd
 user service 的 Linux x64；需要 Node.js 20+ 与支持 JSON 输出、JSON1 和 `RETURNING` 的 SQLite CLI 3.35+。Linux 实机证据来自 Ubuntu 22.04 LTS x64，Ubuntu
 24.04 x64 当前只有 CI 证据；Linux arm64、容器、WSL、NAS 与无 systemd 环境不在已验证矩阵。部署路径见
 [Linux VPS runbook](docs/operations/linux-vps.md)。
@@ -162,7 +162,7 @@ wakebridge init \
   --timezone UTC
 ```
 
-候选使用 schema 9，已发布 preview.20 使用 schema 8。旧 schema 不会在普通 daemon/inspect 启动时隐式迁移。
+本版使用 schema 9，preview.20 使用 schema 8。旧 schema 不会在普通 daemon/inspect 启动时隐式迁移。
 升级必须离线使用带 verified snapshot 和失败自动恢复的 `wakebridge upgrade`；回退旧包需要升级前的 verified backup，不能用旧包打开 schema 9。完整流程见 [release lifecycle runbook](docs/operations/release-lifecycle.md)。
 
 ### 公共扩展入口
