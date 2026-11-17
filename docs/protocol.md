@@ -1,6 +1,6 @@
 # 协议与数据模型
 
-状态：`0.9.0-preview.21` public contract；实际发行以同 tag 门禁与产物为准。Event、Claim、policy、watch、binding、Batch 与 receipt 的
+状态：`0.9.0-preview.22` public contract；实际发行以同 tag 门禁与产物为准。Event、Claim、policy、watch、binding、Batch 与 receipt 的
 逻辑边界有效；首版 topology 是单 Agent Space instance。policy v1 当前面见第 5、11 节；service registry/enrollment 是
 post-MVP proposal。
 
@@ -473,7 +473,9 @@ batch 等待 endpoint，不依赖未经证明的 cold route。
 - `claim.list(state?, channel?, source?, limit?)`：返回最近 `limit` 条，按创建时间从旧到新；完整计数用 status，不受列表上限影响；
 - `claim.snooze(claim_id, until)`；
 - `claim.dismiss(claim_id, reason?)`；
+- `claim.dismiss_many(claim_ids, reason?)`：单次 1–500 条，逐项执行并返回紧凑成功/错误结果；部分失败不回滚已经成功的条目；
 - `claim.consume(claim_id, result?)`；
+- `claim.consume_many(claim_ids, result?)`：单次 1–500 条，语义与逐项调用一致；输入 ID 不得重复；
 - `presence.renew(channel, endpoint, generation, ttl, observation)`：可信 host-only；
 - `presence.inspect(channel?)`：只读解释当前 lease 与到期时间；
 - `activity-watch.configure(channel, enabled, idle_after, mode, repeat_after?)`：agent-only；显式配置 watch；
@@ -564,7 +566,7 @@ POST /v1/bootstrap {"mode": "from-now"}  # optional, explicit first-install oper
 
 Supervisor 对 `has_more` 做有界续页；到达 page budget 后让出 event loop，再立即安排下一轮。每次 poll 前必须核对 live manifest 与 checkpoint 的 subject/binding；不匹配时 fail closed。连接失败和 provider/connector 5xx 进入指数退避；缺 token、401/403、identity/manifest/schema/cursor 错误进入 `needs_attention`，不永久盲重试。`GET /v1/sources` 返回不含 secret 的状态，管理员可用 `POST /v1/sources/:id/poll` 做一次受控同步。
 
-`source-bootstrap SOURCE --mode from-now` 只允许在该 source 尚无 checkpoint 时执行，并要求调用者显式传回 verify 得到的 subject/binding。它调用 connector 的可选 bootstrap endpoint，把返回 cursor 以 revision 1 写入，不创建 event/claim/wake；第二次调用 fail closed。Bootstrap 仍必须满足 `read_side_effects=none`。Agent-facing MCP 另提供 status/verify/bootstrap/rebind/enable/disable；rebind 会归档旧 checkpoint，enable intent 会持久化。所有 source control tool 都不接受 provider URL/credential。
+`source-bootstrap SOURCE --mode from-now` 只允许在该 source 尚无 checkpoint 时执行，并要求调用者显式传回 verify 得到的 subject/binding。它调用 connector 的可选 bootstrap endpoint，把返回 cursor 以 revision 1 写入，不创建 event/claim/wake；第二次调用 fail closed。Bootstrap 仍必须满足 `read_side_effects=none`。Agent-facing MCP 另提供 status/verify/bootstrap/rebind/enable/disable，以及单次最多 100 个 source 的 enable_many/disable_many；批量调用逐项返回结果，部分失败不回滚已经成功的条目。rebind 会归档旧 checkpoint，enable intent 会持久化。所有 source control tool 都不接受 provider URL/credential。
 
 ## 13. Transport capability 与 dispatch contract
 

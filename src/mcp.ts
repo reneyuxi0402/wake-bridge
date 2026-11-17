@@ -170,6 +170,21 @@ function asOptionalString(args: JsonObject, key: string, max = 4096): string | u
   return asString(args, key, false, max);
 }
 
+function asUniqueStringArray(args: JsonObject, key: string, maxItems: number, maxLength: number): string[] {
+  const value = args[key];
+  if (!Array.isArray(value) || value.length < 1 || value.length > maxItems) {
+    throw new BridgeError(`${key} must contain between 1 and ${maxItems} items`, "invalid_arguments", 400);
+  }
+  const items = value.map((item) => {
+    if (typeof item !== "string" || !item.trim() || item.length > maxLength) {
+      throw new BridgeError(`${key} contains an invalid item`, "invalid_arguments", 400);
+    }
+    return item;
+  });
+  if (new Set(items).size !== items.length) throw new BridgeError(`${key} must not contain duplicates`, "invalid_arguments", 400);
+  return items;
+}
+
 function asOptionalBoolean(args: JsonObject, key: string): boolean | undefined {
   const value = args[key];
   if (value === undefined) return undefined;
@@ -330,6 +345,19 @@ function toolDefinitions(): JsonObject[] {
       },
     },
     {
+      name: "attention_consume_many",
+      description: "Mark up to 500 attention claims consumed in one request. The same optional result is applied to each claim. Items are handled independently and returned as compact per-item successes or errors; one failure does not roll back successful items.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          claim_ids: { type: "array", minItems: 1, maxItems: 500, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 200 } },
+          result: {},
+        },
+        required: ["claim_ids"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "attention_snooze",
       description: "Defer one attention claim until a future ISO timestamp. If channel_deleted is returned, stop retrying and inspect the terminal state with attention_status; deletion is not consumption and must not be reported as consumed.",
       inputSchema: {
@@ -352,6 +380,19 @@ function toolDefinitions(): JsonObject[] {
           reason: { type: "string", maxLength: 500 },
         },
         required: ["claim_id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "attention_dismiss_many",
+      description: "Dismiss up to 500 attention claims in one request without changing their authoritative sources. The same optional reason is applied to each claim. Items are handled independently and returned as compact per-item successes or errors; one failure does not roll back successful items.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          claim_ids: { type: "array", minItems: 1, maxItems: 500, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 200 } },
+          reason: { type: "string", maxLength: 500 },
+        },
+        required: ["claim_ids"],
         additionalProperties: false,
       },
     },
@@ -487,9 +528,19 @@ function toolDefinitions(): JsonObject[] {
       inputSchema: { type: "object", properties: { source: { type: "string", minLength: 1, maxLength: 128 } }, required: ["source"], additionalProperties: false },
     },
     {
+      name: "attention_source_enable_many",
+      description: "Enable polling for up to 100 sources in one request. Each live connector identity must match its durable checkpoint. Items are handled independently and returned as compact per-item successes or errors.",
+      inputSchema: { type: "object", properties: { sources: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 128 } } }, required: ["sources"], additionalProperties: false },
+    },
+    {
       name: "attention_source_disable",
       description: "Stop future polling for a source without deleting events, claims, receipts, or checkpoint history. Disable intent survives daemon restart.",
       inputSchema: { type: "object", properties: { source: { type: "string", minLength: 1, maxLength: 128 } }, required: ["source"], additionalProperties: false },
+    },
+    {
+      name: "attention_source_disable_many",
+      description: "Stop future polling for up to 100 sources in one request without deleting durable history. Items are handled independently and returned as compact per-item successes or errors.",
+      inputSchema: { type: "object", properties: { sources: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 128 } } }, required: ["sources"], additionalProperties: false },
     },
   ];
 }
@@ -612,6 +663,20 @@ export class WakeBridgeMcpServer {
         const claim = this.bridge.consumeClaim(asString(args, "claim_id", true, 200)!, asJsonValue(args.result, "result"));
         return { claim: compactClaim(claim) };
       }
+      case "attention_consume_many": {
+        assertAllowed(args, ["claim_ids", "result"]);
+        const claimIds = asUniqueStringArray(args, "claim_ids", 500, 200);
+        const result = asJsonValue(args.result, "result");
+        const results = claimIds.map((claimId) => {
+          try {
+            const claim = this.bridge.consumeClaim(claimId, result);
+            return { claim_id: claim.id, ok: true, state: claim.state };
+          } catch (error) {
+            return { claim_id: claimId, ok: false, ...this.errorValue(error) };
+          }
+        });
+        return { requested: claimIds.length, succeeded: results.filter((item) => item.ok).length, failed: results.filter((item) => !item.ok).length, results };
+      }
       case "attention_snooze": {
         assertAllowed(args, ["claim_id", "until"]);
         const claim = this.bridge.snoozeClaim(asString(args, "claim_id", true, 200)!, asAbsoluteTimestamp(args, "until"));
@@ -621,6 +686,20 @@ export class WakeBridgeMcpServer {
         assertAllowed(args, ["claim_id", "reason"]);
         const claim = this.bridge.dismissClaim(asString(args, "claim_id", true, 200)!, asOptionalString(args, "reason", 500) || "dismissed");
         return { claim: compactClaim(claim) };
+      }
+      case "attention_dismiss_many": {
+        assertAllowed(args, ["claim_ids", "reason"]);
+        const claimIds = asUniqueStringArray(args, "claim_ids", 500, 200);
+        const reason = asOptionalString(args, "reason", 500) || "dismissed";
+        const results = claimIds.map((claimId) => {
+          try {
+            const claim = this.bridge.dismissClaim(claimId, reason);
+            return { claim_id: claim.id, ok: true, state: claim.state };
+          } catch (error) {
+            return { claim_id: claimId, ok: false, ...this.errorValue(error) };
+          }
+        });
+        return { requested: claimIds.length, succeeded: results.filter((item) => item.ok).length, failed: results.filter((item) => !item.ok).length, results };
       }
       case "attention_status": {
         assertAllowed(args, ["claim_id", "batch_id", "channel"]);
@@ -848,9 +927,37 @@ export class WakeBridgeMcpServer {
       case "attention_source_enable":
         assertAllowed(args, ["source"]);
         return await this.sources().enable(asString(args, "source", true, 128)!);
+      case "attention_source_enable_many": {
+        assertAllowed(args, ["sources"]);
+        const sources = asUniqueStringArray(args, "sources", 100, 128);
+        const results = [];
+        for (const source of sources) {
+          try {
+            const enabled = await this.sources().enable(source);
+            results.push({ source, ok: true, enabled: Boolean((enabled as JsonObject).source && ((enabled as JsonObject).source as JsonObject).enabled) });
+          } catch (error) {
+            results.push({ source, ok: false, ...this.errorValue(error) });
+          }
+        }
+        return { requested: sources.length, succeeded: results.filter((item) => item.ok).length, failed: results.filter((item) => !item.ok).length, results };
+      }
       case "attention_source_disable":
         assertAllowed(args, ["source"]);
         return await this.sources().disable(asString(args, "source", true, 128)!);
+      case "attention_source_disable_many": {
+        assertAllowed(args, ["sources"]);
+        const sources = asUniqueStringArray(args, "sources", 100, 128);
+        const results = [];
+        for (const source of sources) {
+          try {
+            const disabled = await this.sources().disable(source);
+            results.push({ source, ok: true, enabled: Boolean((disabled as JsonObject).source && ((disabled as JsonObject).source as JsonObject).enabled) });
+          } catch (error) {
+            results.push({ source, ok: false, ...this.errorValue(error) });
+          }
+        }
+        return { requested: sources.length, succeeded: results.filter((item) => item.ok).length, failed: results.filter((item) => !item.ok).length, results };
+      }
       default:
         throw new BridgeError("unknown tool", "unknown_tool", 404);
     }

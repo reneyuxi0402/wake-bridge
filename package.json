@@ -1,6 +1,6 @@
 {
   "name": "wake-bridge",
-  "version": "0.9.0-preview.21",
+  "version": "0.9.0-preview.22",
   "description": "Local-first durable attention scheduler and wake bridge for agent harnesses",
   "license": "Apache-2.0",
   "repository": {
@@ -75,6 +75,7 @@
     "docs/releases/0.9.0-preview.19.md",
     "docs/releases/0.9.0-preview.20.md",
     "docs/releases/0.9.0-preview.21.md",
+    "docs/releases/0.9.0-preview.22.md",
     "host-adapters/claude-cli/src",
     "host-adapters/claude-cli/examples/host-adapters.json",
     "host-adapters/claude-cli/docs/verification.md",

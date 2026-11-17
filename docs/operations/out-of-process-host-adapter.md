@@ -198,6 +198,7 @@ Agent 实际读到 envelope 后调用 MCP：
 这是 `attention_ack` 的参数；不要附加 endpoint、generation、nonce 或 source。随后用 agent 自己的授权来源工具读取 resource，
 审阅/处理完某条 claim 后才调用 `attention_consume({"claim_id":"ac_..."})`。Adapter 不替 agent 确认理解或完成工作，
 也不能为消除告警而自动调用这两个工具。`consumeWakeEcho()` 只是 host 注入证明，不是 `attention_ack` 的替代。
+一次确实已经共同处理完多条 claim 时，可以使用 `attention_consume_many({"claim_ids":[...],"result":...})`；批量清理陈旧提醒可用 `attention_dismiss_many({"claim_ids":[...],"reason":"..."})`。两者单次最多 500 条、逐项返回结果，不能用来绕过逐条审阅要求。
 
 Agent 可能先于 Core 落地 accepted attempt 调用 ack，此时可得到 `409 batch_not_dispatched`。先用
 `attention_wake_health({"batch_id":"wb_..."})` 核对同 batch 的接受证据；确认当前投递已被接受后，agent 可重试同一个 ack，成功后重复 ack 是幂等的。

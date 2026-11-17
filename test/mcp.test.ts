@@ -49,8 +49,10 @@ describe("Wake Bridge stdio MCP", () => {
       "attention_schedule",
       "attention_ack",
       "attention_consume",
+      "attention_consume_many",
       "attention_snooze",
       "attention_dismiss",
+      "attention_dismiss_many",
       "attention_status",
       "attention_list",
       "attention_event_list",
@@ -63,7 +65,9 @@ describe("Wake Bridge stdio MCP", () => {
       "attention_source_bootstrap",
       "attention_source_rebind",
       "attention_source_enable",
+      "attention_source_enable_many",
       "attention_source_disable",
+      "attention_source_disable_many",
     ]);
     expect(names).not.toContain("attention_wait");
     const deletion = (listed?.result as any).tools.find((tool: any) => tool.name === "attention_channel_delete");
@@ -129,6 +133,39 @@ describe("Wake Bridge stdio MCP", () => {
     expect(consumed.claim).toMatchObject({ id: second.claim.id, state: "consumed" });
     const status = await call(server, 8, "attention_status");
     expect(status.claims).toMatchObject({ dismissed: 1, consumed: 1 });
+    b.close();
+  });
+
+  it("dismisses and consumes claims in bounded independent batches", async () => {
+    const b = bridge();
+    const server = new WakeBridgeMcpServer(b);
+    const due = new Date(Date.now() + 60_000).toISOString();
+    const claims = await Promise.all(["a", "b", "c"].map((suffix, index) => call(server, index + 1, "attention_schedule", {
+      resource: `memory://bulk/${suffix}`,
+      eligible_after: due,
+      idempotency_key: `bulk-${suffix}`,
+    })));
+    const dismissed = await call(server, 4, "attention_dismiss_many", {
+      claim_ids: [claims[0].claim.id, "missing-claim", claims[1].claim.id],
+      reason: "bulk cleanup",
+    });
+    expect(dismissed).toEqual({
+      requested: 3,
+      succeeded: 2,
+      failed: 1,
+      results: [
+        { claim_id: claims[0].claim.id, ok: true, state: "dismissed" },
+        { claim_id: "missing-claim", ok: false, error: "claim_not_found", message: "claim not found" },
+        { claim_id: claims[1].claim.id, ok: true, state: "dismissed" },
+      ],
+    });
+    const consumed = await call(server, 5, "attention_consume_many", {
+      claim_ids: [claims[2].claim.id],
+      result: { handled: true },
+    });
+    expect(consumed).toEqual({ requested: 1, succeeded: 1, failed: 0, results: [{ claim_id: claims[2].claim.id, ok: true, state: "consumed" }] });
+    const duplicates = await call(server, 6, "attention_dismiss_many", { claim_ids: [claims[0].claim.id, claims[0].claim.id] });
+    expect(duplicates).toMatchObject({ error: "invalid_arguments" });
     b.close();
   });
 
@@ -256,8 +293,18 @@ describe("Wake Bridge stdio MCP", () => {
     await call(server, 4, "attention_source_rebind", { source: "fixture", expected_checkpoint_revision: 4, expected_subject_ref: "fixture:new", expected_binding_fingerprint: fingerprint, reason: "owner_changed" });
     await call(server, 5, "attention_source_enable", { source: "fixture" });
     await call(server, 6, "attention_source_disable", { source: "fixture" });
-    expect(calls).toEqual(["status", "verify:fixture", "bootstrap:fixture:fixture:owner", "rebind:fixture:4", "enable:fixture", "disable:fixture"]);
-    const leaked = await server.handleRequest({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "attention_source_verify", arguments: { source: "fixture", upstream_url: "secret" } } });
+    const enabled = await call(server, 7, "attention_source_enable_many", { sources: ["fixture", "other"] });
+    expect(enabled).toEqual({
+      requested: 2, succeeded: 2, failed: 0,
+      results: [{ source: "fixture", ok: true, enabled: true }, { source: "other", ok: true, enabled: true }],
+    });
+    const disabled = await call(server, 8, "attention_source_disable_many", { sources: ["fixture", "other"] });
+    expect(disabled).toEqual({
+      requested: 2, succeeded: 2, failed: 0,
+      results: [{ source: "fixture", ok: true, enabled: false }, { source: "other", ok: true, enabled: false }],
+    });
+    expect(calls).toEqual(["status", "verify:fixture", "bootstrap:fixture:fixture:owner", "rebind:fixture:4", "enable:fixture", "disable:fixture", "enable:fixture", "enable:other", "disable:fixture", "disable:other"]);
+    const leaked = await server.handleRequest({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "attention_source_verify", arguments: { source: "fixture", upstream_url: "secret" } } });
     expect(parsed(leaked)).toMatchObject({ error: "invalid_arguments" });
     b.close();
   });

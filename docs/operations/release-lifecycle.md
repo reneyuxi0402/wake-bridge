@@ -1,6 +1,6 @@
 # Release install, upgrade, backup, and rollback
 
-状态：`0.9.0-preview.21` runbook；本地验收与同 tag 发布门禁分开记录，实际发行以产物为准，见 [验证口径](../verification.md)。Wake Bridge 发布包只支持 Host Adapter Contract；
+状态：`0.9.0-preview.22` runbook；本地验收与同 tag 发布门禁分开记录，实际发行以产物为准，见 [验证口径](../verification.md)。Wake Bridge 发布包只支持 Host Adapter Contract；
 完成本页不等于任何具体 agent 产品获得兼容性或时延保证。
 
 ## 支持矩阵
@@ -32,7 +32,7 @@ Source Connector、Host Adapter 与 agent runtime 必须同机；跨机器 Remot
 
 ```bash
 npm pack --json
-npm install --global ./wake-bridge-0.9.0-preview.21.tgz
+npm install --global ./wake-bridge-0.9.0-preview.22.tgz
 wakebridge release-preflight
 ```
 

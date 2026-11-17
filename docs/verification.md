@@ -2,7 +2,7 @@
 
 ## 发行基线与源码增量
 
-本版为 `0.9.0-preview.21`，见 [release notes](releases/0.9.0-preview.21.md)。实际发行以同 tag 门禁与可下载产物为准。
+本版为 `0.9.0-preview.22`，见 [release notes](releases/0.9.0-preview.22.md)。实际发行以同 tag 门禁与可下载产物为准。
 以下保留 preview.20 的 [release notes](releases/0.9.0-preview.20.md) 与历史源码验收证据。
 发布准备前源码提交 `c281df19469e03b18826a9259b671e789049d7dd` 的本地完整回归为 488 项 Vitest + 17 项 Node，共 505 项；
 [同提交 CI](https://github.com/reneyuxi0402/wake-bridge/actions/runs/40284178626) 四组首轮全部通过。

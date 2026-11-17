@@ -155,6 +155,8 @@ Agent 日常使用 MCP 自助完成：
 3. 首次接入用 `attention_source_bootstrap`，已有错误/旧身份 checkpoint 用 `attention_source_rebind`；两者都必须回传 verify 结果中的准确身份；
 4. 验收准备完成后，调用 `attention_source_enable({"source":"example-notifications"})` 受控开始轮询；需要停用时调用 `attention_source_disable`。enable/disable 会持久化并跨 daemon 重启保留。Source enabled 只表示允许轮询，不证明 source healthy、事件到达或 agent 已醒来。
 
+需要同时切换多个已配置来源时，可以使用 `attention_source_enable_many({"sources":[...]})` 或 `attention_source_disable_many({"sources":[...]})`，每次最多 100 个且不能重复。返回值包含 requested/succeeded/failed 与逐项结果；单个来源失败不会回滚其他来源。批量 enable 不降低身份校验要求，每个来源仍须各自具备匹配的 durable checkpoint。
+
 Source control MCP 只接受 source id、非敏感身份确认、checkpoint revision 与 rebind reason，不接受任何 provider URL 或 credential。Opaque cursor 也不会经 status/verify 暴露给 agent。
 
 对应的 authenticated loopback 管理 API：
